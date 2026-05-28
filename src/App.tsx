@@ -1563,27 +1563,140 @@ type GameOverProps = {
 }
 
 function GameOver({ state, cardArtworkStyle, onReset }: GameOverProps) {
-  const winners = state.players.filter((player) => state.winnerIds.includes(player.id))
+  const standings = createFinalStandings(state)
+  const winners = standings.filter((standing) => standing.rank === 1)
 
   return (
     <div className="result-card game-over-card">
       <div className="result-heading">
         <div>
           <p className="eyebrow">Game over</p>
-          <h2>{winners.length > 1 ? 'Winners' : 'Winner'}: {winners.map((player) => player.name).join(', ')}</h2>
+          <h2>
+            {winners.length > 1 ? 'Winners' : 'Winner'}:{' '}
+            {winners.map((standing) => standing.playerName).join(', ')}
+          </h2>
         </div>
         <p>
           Someone reached {GAME_OVER_SCORE}+ total points. Lowest total score wins.
         </p>
       </div>
 
-      <ScoreTable state={state} cardArtworkStyle={cardArtworkStyle} />
+      <FinalStandings standings={standings} cardArtworkStyle={cardArtworkStyle} />
 
       <button className="primary-button" type="button" onClick={onReset}>
         Play again
       </button>
     </div>
   )
+}
+
+type FinalStanding = {
+  rank: number
+  playerId: string
+  playerName: string
+  handValue: number
+  roundPoints: number
+  totalScore: number
+  hand: Card[]
+  isWinner: boolean
+}
+
+type FinalStandingsProps = {
+  standings: FinalStanding[]
+  cardArtworkStyle: CardArtworkStyle
+}
+
+function FinalStandings({ standings, cardArtworkStyle }: FinalStandingsProps) {
+  return (
+    <div className="final-standings" aria-label="Final player rankings">
+      <div className="final-standings-header">
+        <span>Rank</span>
+        <span>Player</span>
+        <span>Total</span>
+        <span>Round</span>
+        <span>Hand</span>
+      </div>
+      {standings.map((standing) => (
+        <div
+          className={`final-standing-row${standing.isWinner ? ' winner' : ''}`}
+          key={standing.playerId}
+        >
+          <strong className="rank-pill">{formatRank(standing.rank)}</strong>
+          <div className="final-player-summary">
+            <strong>{standing.playerName}</strong>
+            <span>{standing.isWinner ? 'Winner' : 'Final standing'}</span>
+          </div>
+          <span>{standing.totalScore}</span>
+          <span>{standing.roundPoints}</span>
+          <span>{standing.handValue}</span>
+          <div className="revealed-hand final-hand">
+            {standing.hand.map((card) => (
+              <CardFace
+                card={card}
+                cardArtworkStyle={cardArtworkStyle}
+                compact
+                key={card.id}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function createFinalStandings(state: GameState): FinalStanding[] {
+  const scores = state.players
+    .map((player, playerIndex) => {
+      const score = state.roundSummary?.scores.find(
+        (roundScore) => roundScore.playerId === player.id,
+      )
+
+      return {
+        playerIndex,
+        playerId: player.id,
+        playerName: score?.playerName ?? player.name,
+        handValue: score?.handValue ?? calculateHandValue(player.hand),
+        roundPoints: score?.roundPoints ?? 0,
+        totalScore: score?.totalScore ?? player.totalScore,
+        hand: player.hand,
+      }
+    })
+    .sort(
+      (firstPlayer, secondPlayer) =>
+        firstPlayer.totalScore - secondPlayer.totalScore ||
+        firstPlayer.playerIndex - secondPlayer.playerIndex,
+    )
+
+  let currentRank = 0
+  let previousScore: number | null = null
+
+  return scores.map((score, index) => {
+    if (score.totalScore !== previousScore) {
+      currentRank = index + 1
+    }
+
+    previousScore = score.totalScore
+
+    return {
+      ...score,
+      rank: currentRank,
+      isWinner: currentRank === 1,
+    }
+  })
+}
+
+function formatRank(rank: number): string {
+  const lastTwoDigits = rank % 100
+
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 13) {
+    return `${rank}th`
+  }
+
+  const suffix =
+    rank % 10 === 1 ? 'st' : rank % 10 === 2 ? 'nd' : rank % 10 === 3 ? 'rd' : 'th'
+
+  return `${rank}${suffix}`
 }
 
 type ScoreTableProps = {
