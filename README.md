@@ -83,6 +83,26 @@ bun run server
 
 The app uses in-memory rooms for now. Rooms disappear if the server restarts.
 
+## Run With Docker
+
+Build and start the production app with Docker Compose:
+
+```sh
+docker compose up --build
+```
+
+Then open:
+
+```txt
+http://localhost:3001
+```
+
+Stop the container with:
+
+```sh
+docker compose down
+```
+
 ## Implemented Rules
 
 - Standard 52-card deck.
