@@ -31,6 +31,7 @@ type ServerSocket = Bun.ServerWebSocket<SocketData>
 
 type ServerPlayer = OnlineLobbyPlayer & {
   sessionId?: string
+  disconnectedTimeoutUsed: boolean
 }
 
 type ServerRoom = {
@@ -43,6 +44,7 @@ type ServerRoom = {
   nextBotNumber: number
   botTimer: ReturnType<typeof setTimeout> | null
   turnTimer: ReturnType<typeof setTimeout> | null
+  inactiveCleanupTimer: ReturnType<typeof setTimeout> | null
   turnTimerSeconds: number
   turnDeadline: number | null
   turnTimerKey: string | null
@@ -51,6 +53,7 @@ type ServerRoom = {
 
 const rooms = new Map<string, ServerRoom>()
 const port = Number(Bun.env.PORT ?? 3001)
+const INACTIVE_ROOM_TIMEOUT_MS = 15 * 60 * 1000
 
 Bun.serve<SocketData>({
   port,
@@ -145,6 +148,9 @@ function handleSocketMessage(socket: ServerSocket, rawMessage: string | Buffer) 
     case 'KICK_PLAYER':
       kickPlayer(socket, message.playerId)
       return
+    case 'DELETE_ROOM':
+      deleteRoom(socket)
+      return
     case 'START_GAME':
       startGame(socket)
       return
@@ -181,6 +187,8 @@ function createRoom(
     isBot: false,
     connected: true,
     ready: true,
+    substituteActive: false,
+    disconnectedTimeoutUsed: false,
     sessionId,
   }
   const room: ServerRoom = {
@@ -193,6 +201,7 @@ function createRoom(
     nextBotNumber: 1,
     botTimer: null,
     turnTimer: null,
+    inactiveCleanupTimer: null,
     turnTimerSeconds: normalizeTurnTimerSeconds(turnTimerSeconds),
     turnDeadline: null,
     turnTimerKey: null,
@@ -232,6 +241,8 @@ function joinRoom(socket: ServerSocket, roomCodeInput: string, name: string) {
     isBot: false,
     connected: true,
     ready: false,
+    substituteActive: false,
+    disconnectedTimeoutUsed: false,
     sessionId,
   }
 
@@ -263,7 +274,9 @@ function rejoinRoom(
 
   room.message = `${player.name} reconnected.`
   attachSocket(socket, room, player, sessionId)
+  startTurnTimer(room)
   broadcastRoom(room)
+  scheduleBotTurn(room)
 }
 
 function addBot(socket: ServerSocket) {
@@ -294,6 +307,8 @@ function addBot(socket: ServerSocket) {
     isBot: true,
     connected: true,
     ready: true,
+    substituteActive: false,
+    disconnectedTimeoutUsed: false,
   }
 
   room.nextPlayerNumber += 1
@@ -398,6 +413,22 @@ function kickPlayer(socket: ServerSocket, playerId: string) {
   broadcastRoom(room)
 }
 
+function deleteRoom(socket: ServerSocket) {
+  const room = getSocketRoom(socket)
+  if (!room) {
+    sendError(socket, 'Join a room before deleting it.')
+    return
+  }
+
+  if (!isHost(socket, room)) {
+    sendError(socket, 'Only the host can delete this room.')
+    return
+  }
+
+  const host = room.players.find((player) => player.id === room.hostPlayerId)
+  closeRoom(room, `${host?.name ?? 'The host'} deleted room ${room.roomCode}.`)
+}
+
 function startGame(socket: ServerSocket) {
   const room = getSocketRoom(socket)
   if (!room) {
@@ -464,8 +495,8 @@ function applyPlayerAction(socket: ServerSocket, action: GameAction) {
     return
   }
 
-  if (currentPlayer.isBot) {
-    sendError(socket, 'The server controls BOT turns.')
+  if (isServerControlledPlayer(room, currentPlayer)) {
+    sendError(socket, 'The server controls this turn.')
     return
   }
 
@@ -496,12 +527,17 @@ function applyRoomAction(socket: ServerSocket, action: GameAction) {
 }
 
 function scheduleBotTurn(room: ServerRoom) {
-  if (room.botTimer || !room.gameState || room.gameState.status !== 'playing') {
+  if (
+    room.botTimer ||
+    !hasConnectedHuman(room) ||
+    !room.gameState ||
+    room.gameState.status !== 'playing'
+  ) {
     return
   }
 
   const currentPlayer = getCurrentPlayer(room.gameState)
-  if (!currentPlayer?.isBot) {
+  if (!currentPlayer || !isServerControlledPlayer(room, currentPlayer)) {
     return
   }
 
@@ -518,7 +554,7 @@ function processBotTurn(room: ServerRoom) {
   }
 
   const currentPlayer = getCurrentPlayer(gameState)
-  if (!currentPlayer?.isBot) {
+  if (!currentPlayer || !isServerControlledPlayer(room, currentPlayer)) {
     return
   }
 
@@ -548,7 +584,7 @@ function processBotTurn(room: ServerRoom) {
 function startTurnTimer(room: ServerRoom) {
   clearTurnTimer(room)
 
-  if (!room.gameState || room.gameState.status !== 'playing') {
+  if (!hasConnectedHuman(room) || !room.gameState || room.gameState.status !== 'playing') {
     room.turnDeadline = null
     room.turnTimerKey = null
     return
@@ -585,9 +621,24 @@ function processTurnTimeout(room: ServerRoom, turnTimerKey: string | null) {
     return
   }
 
+  const serverPlayer = getServerPlayer(room, currentPlayer.id)
   const action = createTimeoutAction(room.gameState, currentPlayer)
   room.gameState = gameReducer(room.gameState, action)
-  room.message = `${currentPlayer.name} ran out of time. ${room.gameState.message}`
+
+  const shouldStartSubstitute =
+    serverPlayer &&
+    !serverPlayer.isBot &&
+    !serverPlayer.connected &&
+    !serverPlayer.substituteActive
+
+  if (shouldStartSubstitute) {
+    serverPlayer.substituteActive = true
+    serverPlayer.disconnectedTimeoutUsed = true
+  }
+
+  room.message = shouldStartSubstitute
+    ? `${currentPlayer.name} ran out of time. A BOT is now playing their seat. ${room.gameState.message}`
+    : `${currentPlayer.name} ran out of time. ${room.gameState.message}`
   startTurnTimer(room)
   broadcastRoom(room)
   scheduleBotTurn(room)
@@ -618,6 +669,42 @@ function clearTurnTimer(room: ServerRoom) {
   }
 }
 
+function clearBotTimer(room: ServerRoom) {
+  if (room.botTimer) {
+    clearTimeout(room.botTimer)
+    room.botTimer = null
+  }
+}
+
+function clearInactiveCleanupTimer(room: ServerRoom) {
+  if (room.inactiveCleanupTimer) {
+    clearTimeout(room.inactiveCleanupTimer)
+    room.inactiveCleanupTimer = null
+  }
+}
+
+function closeRoom(room: ServerRoom, message: string) {
+  clearBotTimer(room)
+  clearTurnTimer(room)
+  clearInactiveCleanupTimer(room)
+  rooms.delete(room.roomCode)
+
+  for (const socket of room.sockets.values()) {
+    socket.send(
+      JSON.stringify({
+        type: 'ROOM_CLOSED',
+        roomCode: room.roomCode,
+        message,
+      } satisfies ServerToClientMessage),
+    )
+    socket.data.roomCode = undefined
+    socket.data.playerId = undefined
+    socket.data.sessionId = undefined
+  }
+
+  room.sockets.clear()
+}
+
 function createTurnTimerKey(gameState: GameState): string {
   const currentPlayer = getCurrentPlayer(gameState)
   return `${gameState.roundNumber}:${gameState.currentPlayerIndex}:${currentPlayer?.id ?? 'none'}:${gameState.phase}`
@@ -633,7 +720,10 @@ function attachSocket(
   socket.data.playerId = player.id
   socket.data.sessionId = sessionId
   room.sockets.set(socket.data.socketId, socket)
+  player.substituteActive = false
+  player.disconnectedTimeoutUsed = false
   updateConnectionFlags(room)
+  updateInactiveCleanup(room)
 }
 
 function detachSocket(socket: ServerSocket) {
@@ -647,32 +737,47 @@ function detachSocket(socket: ServerSocket) {
 
   const player = room.players.find((candidate) => candidate.id === socket.data.playerId)
   if (player && !player.connected) {
+    player.substituteActive = false
+    player.disconnectedTimeoutUsed = false
     room.message = `${player.name} disconnected.`
   }
 
   socket.data.roomCode = undefined
   socket.data.playerId = undefined
   socket.data.sessionId = undefined
-  broadcastRoom(room)
 
-  if (!room.players.some((candidate) => !candidate.isBot && candidate.connected)) {
-    scheduleRoomCleanup(room.roomCode)
+  if (!hasConnectedHuman(room)) {
+    clearBotTimer(room)
+    clearTurnTimer(room)
+    room.turnDeadline = null
+    room.turnTimerKey = null
   }
+
+  updateInactiveCleanup(room)
+  broadcastRoom(room)
 }
 
-function scheduleRoomCleanup(roomCode: string) {
-  setTimeout(() => {
-    const room = rooms.get(roomCode)
-    if (!room) {
+function updateInactiveCleanup(room: ServerRoom) {
+  if (hasConnectedHuman(room)) {
+    clearInactiveCleanupTimer(room)
+    return
+  }
+
+  if (room.inactiveCleanupTimer) {
+    return
+  }
+
+  room.inactiveCleanupTimer = setTimeout(() => {
+    const inactiveRoom = rooms.get(room.roomCode)
+    if (!inactiveRoom) {
       return
     }
 
-    updateConnectionFlags(room)
-    if (!room.players.some((player) => !player.isBot && player.connected)) {
-      clearTurnTimer(room)
-      rooms.delete(roomCode)
+    updateConnectionFlags(inactiveRoom)
+    if (!hasConnectedHuman(inactiveRoom)) {
+      closeRoom(inactiveRoom, `Room ${inactiveRoom.roomCode} was removed after 15 minutes of inactivity.`)
     }
-  }, 30 * 60 * 1000)
+  }, INACTIVE_ROOM_TIMEOUT_MS)
 }
 
 function broadcastRoom(room: ServerRoom) {
@@ -713,6 +818,7 @@ function createRoomView(
       isBot: player.isBot,
       connected: player.connected,
       ready: player.ready,
+      substituteActive: player.substituteActive,
     })),
     gameState: room.gameState ? redactGameState(room.gameState, viewerPlayerId) : null,
     viewerPlayerId,
@@ -772,6 +878,23 @@ function getSocketRoom(socket: ServerSocket): ServerRoom | null {
 
 function getCurrentPlayer(gameState: GameState): Player | null {
   return gameState.players[gameState.currentPlayerIndex] ?? null
+}
+
+function getServerPlayer(room: ServerRoom, playerId: string): ServerPlayer | null {
+  return room.players.find((player) => player.id === playerId) ?? null
+}
+
+function isServerControlledPlayer(room: ServerRoom, player: Player): boolean {
+  const serverPlayer = getServerPlayer(room, player.id)
+  return Boolean(
+    player.isBot ||
+      serverPlayer?.isBot ||
+      (serverPlayer?.substituteActive && !serverPlayer.connected),
+  )
+}
+
+function hasConnectedHuman(room: ServerRoom): boolean {
+  return room.players.some((player) => !player.isBot && player.connected)
 }
 
 function getRoomStatus(room: ServerRoom): OnlineRoomStatus {

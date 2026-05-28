@@ -6,6 +6,7 @@ export type OnlineLobbyPlayer = SetupPlayerConfig & {
   id: string
   connected: boolean
   ready: boolean
+  substituteActive: boolean
 }
 
 export type OnlineRoomView = {
@@ -28,6 +29,7 @@ export type ClientToServerMessage =
   | { type: 'REMOVE_BOT'; playerId: string }
   | { type: 'SET_READY'; ready: boolean }
   | { type: 'KICK_PLAYER'; playerId: string }
+  | { type: 'DELETE_ROOM' }
   | { type: 'START_GAME' }
   | { type: 'DISCARD_CARDS'; cardIds: string[] }
   | { type: 'DRAW_CARD'; source: DrawSource }
@@ -37,4 +39,5 @@ export type ClientToServerMessage =
 
 export type ServerToClientMessage =
   | { type: 'ROOM_UPDATE'; room: OnlineRoomView; sessionId: string }
+  | { type: 'ROOM_CLOSED'; roomCode: string; message: string }
   | { type: 'ERROR'; message: string }

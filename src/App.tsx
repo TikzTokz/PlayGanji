@@ -39,6 +39,34 @@ const TURN_TIMER_OPTIONS = [
   { label: '1.5 minutes', seconds: 90 },
   { label: '2 minutes', seconds: 120 },
 ]
+const CARD_ASSET_RANKS = [
+  'ace',
+  '2',
+  '3',
+  '4',
+  '5',
+  '6',
+  '7',
+  '8',
+  '9',
+  '10',
+  'jack',
+  'queen',
+  'king',
+] as const
+const CARD_ASSET_SUITS = ['spades', 'hearts', 'diamonds', 'clubs'] as const
+const STANDARD_FACE_ASSET_RANKS = ['jack', 'queen', 'king'] as const
+const APP_ASSET_URLS = [
+  '/images/table.png',
+  GANJI_SUCCESS_AUDIO,
+  GANJI_FAIL_AUDIO,
+  ...CARD_ASSET_RANKS.flatMap((rank) =>
+    CARD_ASSET_SUITS.map((suit) => `/cards/${rank}_of_${suit}.png`),
+  ),
+  ...STANDARD_FACE_ASSET_RANKS.flatMap((rank) =>
+    CARD_ASSET_SUITS.map((suit) => `/cards/${rank}_of_${suit}2.png`),
+  ),
+]
 
 type PlayMode = 'local' | 'online'
 type CardArtworkStyle = 'standard' | 'simple'
@@ -49,6 +77,16 @@ type SelectionState = {
 }
 
 function App() {
+  const assetPreload = useAssetPreload(APP_ASSET_URLS)
+
+  if (!assetPreload.ready) {
+    return <LoadingScreen loaded={assetPreload.loaded} total={assetPreload.total} />
+  }
+
+  return <GanjiApp />
+}
+
+function GanjiApp() {
   const [state, dispatch] = useReducer(gameReducer, undefined, loadSavedGame)
   const [playMode, setPlayMode] = useState<PlayMode>('local')
   const [playerCount, setPlayerCount] = useState(MIN_PLAYERS)
@@ -302,6 +340,100 @@ function CardArtworkToggle({
   )
 }
 
+type LoadingScreenProps = {
+  loaded: number
+  total: number
+}
+
+function LoadingScreen({ loaded, total }: LoadingScreenProps) {
+  const progress = total > 0 ? Math.round((loaded / total) * 100) : 100
+
+  return (
+    <main className="loading-screen">
+      <div className="loading-card">
+        <p className="eyebrow">Preparing table</p>
+        <h1>Ganji</h1>
+        <p>Loading cards, table art, and sounds before play starts.</p>
+        <div className="loading-meter" aria-label="Asset loading progress">
+          <span style={{ width: `${progress}%` }}></span>
+        </div>
+        <strong>
+          {loaded} / {total} assets loaded
+        </strong>
+      </div>
+    </main>
+  )
+}
+
+function useAssetPreload(assetUrls: string[]) {
+  const [loaded, setLoaded] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    let loadedCount = 0
+
+    for (const assetUrl of assetUrls) {
+      preloadAsset(assetUrl).finally(() => {
+        if (cancelled) {
+          return
+        }
+
+        loadedCount += 1
+        setLoaded(loadedCount)
+      })
+    }
+
+    return () => {
+      cancelled = true
+    }
+  }, [assetUrls])
+
+  return {
+    loaded,
+    total: assetUrls.length,
+    ready: loaded >= assetUrls.length,
+  }
+}
+
+function preloadAsset(assetUrl: string): Promise<void> {
+  if (assetUrl.endsWith('.mp3')) {
+    return preloadAudio(assetUrl)
+  }
+
+  return new Promise((resolve) => {
+    const image = new Image()
+    image.addEventListener('load', () => resolve(), { once: true })
+    image.addEventListener('error', () => resolve(), { once: true })
+    image.src = assetUrl
+  })
+}
+
+function preloadAudio(assetUrl: string): Promise<void> {
+  return new Promise((resolve) => {
+    const audio = new Audio()
+    let resolved = false
+    const timeout = window.setTimeout(finish, 5000)
+
+    function finish() {
+      if (resolved) {
+        return
+      }
+
+      resolved = true
+      window.clearTimeout(timeout)
+      audio.removeEventListener('canplaythrough', finish)
+      audio.removeEventListener('error', finish)
+      resolve()
+    }
+
+    audio.preload = 'auto'
+    audio.addEventListener('canplaythrough', finish)
+    audio.addEventListener('error', finish)
+    audio.src = assetUrl
+    audio.load()
+  })
+}
+
 type SetupScreenProps = {
   playerCount: number
   players: SetupPlayerConfig[]
@@ -459,11 +591,19 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     socketRef.current = socket
 
     socket.addEventListener('open', () => {
+      if (socketRef.current !== socket) {
+        return
+      }
+
       setConnectionStatus('connected')
       socket.send(JSON.stringify(message))
     })
 
     socket.addEventListener('message', (event) => {
+      if (socketRef.current !== socket) {
+        return
+      }
+
       if (typeof event.data !== 'string') {
         return
       }
@@ -472,11 +612,19 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     })
 
     socket.addEventListener('close', () => {
+      if (socketRef.current !== socket) {
+        return
+      }
+
       setConnectionStatus('disconnected')
       setServerMessage('Disconnected from the Ganji server.')
     })
 
     socket.addEventListener('error', () => {
+      if (socketRef.current !== socket) {
+        return
+      }
+
       setServerMessage('Could not connect to the Ganji server.')
     })
   }
@@ -493,6 +641,14 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
 
     if (message.type === 'ERROR') {
       setServerMessage(message.message)
+      return
+    }
+
+    if (message.type === 'ROOM_CLOSED') {
+      setRoom(null)
+      setSelection({ turnKey: '', cardIds: [] })
+      setServerMessage(message.message)
+      forgetOnlineSession()
       return
     }
 
@@ -522,6 +678,20 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
       name: playerName,
       turnTimerSeconds,
     })
+  }
+
+  function leaveOnlineRoom() {
+    const socket = socketRef.current
+    socketRef.current = null
+    socket?.close()
+    setRoom(null)
+    setSelection({ turnKey: '', cardIds: [] })
+    setConnectionStatus('idle')
+    setServerMessage('Left the room. Create or join another room.')
+  }
+
+  function deleteOnlineRoom() {
+    sendOnlineMessage({ type: 'DELETE_ROOM' })
   }
 
   function joinOnlineRoom() {
@@ -587,6 +757,9 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
         <OnlineRoomBar
           room={room}
           connectionStatus={connectionStatus}
+          onCreateRoom={createOnlineRoom}
+          onDeleteRoom={deleteOnlineRoom}
+          onLeaveRoom={leaveOnlineRoom}
           onReconnect={reconnectOnlineRoom}
         />
         <GameScreen
@@ -702,6 +875,8 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
             }
             onSetReady={(ready) => sendOnlineMessage({ type: 'SET_READY', ready })}
             onStartGame={() => sendOnlineMessage({ type: 'START_GAME' })}
+            onDeleteRoom={deleteOnlineRoom}
+            onLeaveRoom={leaveOnlineRoom}
             onReconnect={reconnectOnlineRoom}
           />
         )}
@@ -715,15 +890,23 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
 type OnlineRoomBarProps = {
   room: OnlineRoomView
   connectionStatus: OnlineConnectionStatus
+  onCreateRoom: () => void
+  onDeleteRoom: () => void
+  onLeaveRoom: () => void
   onReconnect: () => void
 }
 
 function OnlineRoomBar({
   room,
   connectionStatus,
+  onCreateRoom,
+  onDeleteRoom,
+  onLeaveRoom,
   onReconnect,
 }: OnlineRoomBarProps) {
   const remainingSeconds = useTurnTimerRemaining(room.turnDeadline)
+  const isHost = room.viewerPlayerId === room.hostPlayerId
+  const substituteCount = room.players.filter((player) => player.substituteActive).length
 
   return (
     <section className="online-room-bar panel">
@@ -735,7 +918,25 @@ function OnlineRoomBar({
         <span>{connectionStatus}</span>
         <span>{room.players.length} players</span>
         <span>Timer: {formatTimerSeconds(room.turnTimerSeconds)}</span>
+        {substituteCount > 0 && (
+          <span>{formatCount(substituteCount, 'BOT substitute')}</span>
+        )}
         {remainingSeconds !== null && <span>Turn: {remainingSeconds}s</span>}
+        <button className="secondary-button" type="button" onClick={onCreateRoom}>
+          New room
+        </button>
+        <button className="ghost-button" type="button" onClick={onLeaveRoom}>
+          Leave room
+        </button>
+        {isHost && (
+          <button
+            className="ghost-button danger-button"
+            type="button"
+            onClick={onDeleteRoom}
+          >
+            Delete room
+          </button>
+        )}
         <button className="ghost-button" type="button" onClick={onReconnect}>
           Reconnect
         </button>
@@ -778,6 +979,8 @@ type OnlineLobbyProps = {
   onKickPlayer: (playerId: string) => void
   onSetReady: (ready: boolean) => void
   onStartGame: () => void
+  onDeleteRoom: () => void
+  onLeaveRoom: () => void
   onReconnect: () => void
 }
 
@@ -789,6 +992,8 @@ function OnlineLobby({
   onKickPlayer,
   onSetReady,
   onStartGame,
+  onDeleteRoom,
+  onLeaveRoom,
   onReconnect,
 }: OnlineLobbyProps) {
   const isHost = room.viewerPlayerId === room.hostPlayerId
@@ -816,13 +1021,7 @@ function OnlineLobby({
           <div className="lobby-player-row" key={player.id}>
             <div>
               <strong>{player.name}</strong>
-              <span>
-                {player.isBot
-                  ? 'BOT - ready'
-                  : `${player.connected ? 'Connected' : 'Disconnected'} - ${
-                      player.ready ? 'ready' : 'not ready'
-                    }`}
-              </span>
+              <span>{formatOnlinePlayerStatus(player)}</span>
             </div>
             {isHost && player.id !== room.hostPlayerId && (
               <div className="button-row compact-buttons">
@@ -877,9 +1076,27 @@ function OnlineLobby({
           >
             Start game
           </button>
+          <button
+            className="ghost-button danger-button"
+            type="button"
+            onClick={onDeleteRoom}
+          >
+            Delete room
+          </button>
         </div>
       ) : (
-        <p className="phase-banner">The host will start when the table is ready.</p>
+        <div className="lobby-secondary-actions">
+          <p className="phase-banner">The host will start when the table is ready.</p>
+          <button className="ghost-button" type="button" onClick={onLeaveRoom}>
+            Leave room
+          </button>
+        </div>
+      )}
+
+      {isHost && (
+        <button className="ghost-button" type="button" onClick={onLeaveRoom}>
+          Leave without deleting
+        </button>
       )}
 
       {connectionStatus === 'disconnected' && (
@@ -889,6 +1106,20 @@ function OnlineLobby({
       )}
     </div>
   )
+}
+
+function formatOnlinePlayerStatus(player: OnlineRoomView['players'][number]): string {
+  if (player.isBot) {
+    return 'BOT - ready'
+  }
+
+  if (player.substituteActive) {
+    return 'Disconnected - BOT playing this seat'
+  }
+
+  return `${player.connected ? 'Connected' : 'Disconnected'} - ${
+    player.ready ? 'ready' : 'not ready'
+  }`
 }
 
 function OnlineRulesPanel() {
@@ -902,9 +1133,10 @@ function OnlineRulesPanel() {
         <li>The server owns the deck, hands, turns, and scores.</li>
         <li>Each player only receives their own hand while a round is active.</li>
         <li>Friends join with a room code.</li>
-        <li>The host chooses a turn timer, adds BOT players, and can kick humans.</li>
+        <li>The host chooses a turn timer, adds BOT players, kicks humans, and can delete the room.</li>
         <li>Humans must mark ready before the host can start the game.</li>
-        <li>Rooms are in memory, so they reset if the server restarts.</li>
+        <li>Disconnected players time out once, then a BOT plays their seat until they rejoin.</li>
+        <li>Inactive rooms are removed after 15 minutes without connected humans.</li>
       </ul>
     </aside>
   )
@@ -954,7 +1186,7 @@ function GameScreen({
       : null
 
   return (
-    <div className="game-layout">
+    <div className={`game-layout${state.status === 'playing' ? ' active-game-layout' : ''}`}>
       <Scoreboard state={state} />
 
       <section className="table-panel">

@@ -58,8 +58,10 @@ http://localhost:3001
 
 The server hosts both the built web app and the WebSocket endpoint at `/ws`.
 Online rooms require all connected humans to mark ready before the host can start.
-The host and BOT players are always ready, and the host can kick human players from the lobby.
+The host and BOT players are always ready, and the host can kick human players from the lobby or delete the room.
 Kicked players can join again with the room code.
+If a player disconnects after the game starts, they get one normal timeout before a BOT plays their seat.
+When they rejoin, they continue with the hand, score, and seat updated by any BOT actions.
 
 ## Deploy Online
 
@@ -81,7 +83,7 @@ and set the runtime start command to:
 bun run server
 ```
 
-The app uses in-memory rooms for now. Rooms disappear if the server restarts.
+The app uses in-memory rooms for now. Rooms disappear if the server restarts or if no human is connected for 15 minutes.
 
 ## Run With Docker
 
@@ -119,6 +121,9 @@ docker compose down
 - Online rooms use a host-selected turn timer and auto-play a discard or draw when time expires.
 - Online joined humans must mark ready before the host can start; host and BOTs are always ready.
 - Online hosts can kick human players from the lobby, and kicked players can rejoin by room code.
+- Online hosts can delete their room.
+- Online disconnected humans get one timeout, then a BOT plays their seat until they rejoin.
+- Online rooms are removed after 15 minutes with no connected humans.
 - Successful GANJI gives the caller 0 round points when they have or share the lowest hand value.
 - Failed GANJI gives the caller their hand value plus 25 penalty points.
 - Game ends when any player reaches 100 or more total points; lowest total score wins.
