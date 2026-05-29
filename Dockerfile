@@ -1,4 +1,4 @@
-FROM oven/bun:1 AS deps
+FROM docker.io/oven/bun:1 AS deps
 WORKDIR /app
 
 COPY package.json bun.lock ./
@@ -10,7 +10,7 @@ WORKDIR /app
 COPY . .
 RUN bun run build
 
-FROM oven/bun:1-slim AS runtime
+FROM docker.io/oven/bun:1-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production
