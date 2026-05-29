@@ -41,7 +41,7 @@ jobs:
 
     steps:
       - name: Deploy with Docker Compose
-        working-directory: /opt/playganji
+        working-directory: /opt/PlayGanji
         run: |
           git fetch origin main
           git reset --hard origin/main
