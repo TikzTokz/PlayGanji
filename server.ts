@@ -11,6 +11,7 @@ import {
   type GameState,
   type Player,
   type SetupPlayerConfig,
+  normalizeGameOverScore,
 } from './src/game'
 import type {
   ClientToServerMessage,
@@ -46,6 +47,7 @@ type ServerRoom = {
   turnTimer: ReturnType<typeof setTimeout> | null
   inactiveCleanupTimer: ReturnType<typeof setTimeout> | null
   turnTimerSeconds: number
+  gameOverScore: number
   turnDeadline: number | null
   turnTimerKey: string | null
   message: string
@@ -128,7 +130,7 @@ function handleSocketMessage(socket: ServerSocket, rawMessage: string | Buffer) 
 
   switch (message.type) {
     case 'CREATE_ROOM':
-      createRoom(socket, message.name, message.turnTimerSeconds)
+      createRoom(socket, message.name, message.turnTimerSeconds, message.gameOverScore)
       return
     case 'JOIN_ROOM':
       joinRoom(socket, message.roomCode, message.name)
@@ -176,6 +178,7 @@ function createRoom(
   socket: ServerSocket,
   name: string,
   turnTimerSeconds: number,
+  gameOverScore: number,
 ) {
   detachSocket(socket)
 
@@ -203,6 +206,7 @@ function createRoom(
     turnTimer: null,
     inactiveCleanupTimer: null,
     turnTimerSeconds: normalizeTurnTimerSeconds(turnTimerSeconds),
+    gameOverScore: normalizeGameOverScore(gameOverScore),
     turnDeadline: null,
     turnTimerKey: null,
     message: `Room ${roomCode} created. Share the code with friends.`,
@@ -475,6 +479,7 @@ function startGame(socket: ServerSocket) {
   room.gameState = gameReducer(initialGameState, {
     type: 'START_GAME',
     players: setupPlayers,
+    gameOverScore: room.gameOverScore,
   })
   room.message = 'Game started.'
   startTurnTimer(room)
@@ -824,6 +829,7 @@ function createRoomView(
     viewerPlayerId,
     hostPlayerId: room.hostPlayerId,
     turnTimerSeconds: room.turnTimerSeconds,
+    gameOverScore: room.gameOverScore,
     turnDeadline: room.turnDeadline,
     message: room.message,
   }

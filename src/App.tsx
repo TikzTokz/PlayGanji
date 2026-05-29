@@ -2,7 +2,7 @@ import { useEffect, useReducer, useRef, useState, type CSSProperties } from 'rea
 import './App.css'
 import {
   GANJI_LIMIT,
-  GAME_OVER_SCORE,
+  GAME_OVER_SCORE_OPTIONS,
   MAX_PLAYERS,
   MIN_PLAYERS,
   calculateHandValue,
@@ -28,11 +28,22 @@ import type {
 } from './online'
 
 const STORAGE_KEY = 'ganji-game-state-v1'
-const CARD_ARTWORK_STORAGE_KEY = 'ganji-card-artwork-style-v1'
 const ONLINE_NAME_STORAGE_KEY = 'ganji-online-player-name-v1'
 const ONLINE_SESSION_STORAGE_KEY = 'ganji-online-session-v1'
 const GANJI_SUCCESS_AUDIO = '/audio/Ganji_Success.mp3'
 const GANJI_FAIL_AUDIO = '/audio/Ganji_Fail.mp3'
+const DISCARD_AUDIO_BY_COUNT = {
+  1: '/audio/1_Discard.mp3',
+  2: '/audio/2_Discard.mp3',
+  3: '/audio/3_Discard.mp3',
+  4: '/audio/4_Discard.mp3',
+} as const
+const DISCARD_AUDIO_VOLUME_BY_COUNT = {
+  1: 0.35,
+  2: 0.55,
+  3: 0.75,
+  4: 1,
+} as const
 const TURN_TIMER_OPTIONS = [
   { label: '30 seconds', seconds: 30 },
   { label: '1 minute', seconds: 60 },
@@ -50,9 +61,6 @@ const CARD_ASSET_RANKS = [
   '8',
   '9',
   '10',
-  'jack',
-  'queen',
-  'king',
 ] as const
 const CARD_ASSET_SUITS = ['spades', 'hearts', 'diamonds', 'clubs'] as const
 const STANDARD_FACE_ASSET_RANKS = ['jack', 'queen', 'king'] as const
@@ -60,6 +68,7 @@ const APP_ASSET_URLS = [
   '/images/table.png',
   GANJI_SUCCESS_AUDIO,
   GANJI_FAIL_AUDIO,
+  ...Object.values(DISCARD_AUDIO_BY_COUNT),
   ...CARD_ASSET_RANKS.flatMap((rank) =>
     CARD_ASSET_SUITS.map((suit) => `/cards/${rank}_of_${suit}.png`),
   ),
@@ -69,7 +78,7 @@ const APP_ASSET_URLS = [
 ]
 
 type PlayMode = 'local' | 'online'
-type CardArtworkStyle = 'standard' | 'simple'
+type CardArtworkStyle = 'standard'
 
 type SelectionState = {
   turnKey: string
@@ -98,8 +107,7 @@ function GanjiApp() {
     cardIds: [],
   })
   const [visibleTurnKey, setVisibleTurnKey] = useState('')
-  const [cardArtworkStyle, setCardArtworkStyle] =
-    useState<CardArtworkStyle>(loadCardArtworkStyle)
+  const cardArtworkStyle: CardArtworkStyle = 'standard'
 
   const currentPlayer = state.players[state.currentPlayerIndex]
   const turnKey = `${state.status}:${state.roundNumber}:${currentPlayer?.id ?? 'none'}`
@@ -125,14 +133,6 @@ function GanjiApp() {
       // Local save is a convenience, so storage failures should not stop play.
     }
   }, [state])
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(CARD_ARTWORK_STORAGE_KEY, cardArtworkStyle)
-    } catch {
-      // Visual preference persistence should not block the game.
-    }
-  }, [cardArtworkStyle])
 
   useEffect(() => {
     if (playMode !== 'local' || state.status !== 'playing' || !currentPlayer?.isBot) {
@@ -235,10 +235,6 @@ function GanjiApp() {
         </div>
         <div className="header-actions">
           <PlayModeToggle playMode={playMode} onPlayModeChange={setPlayMode} />
-          <CardArtworkToggle
-            artworkStyle={cardArtworkStyle}
-            onArtworkStyleChange={setCardArtworkStyle}
-          />
           {playMode === 'local' && state.status !== 'setup' && (
             <button className="ghost-button" type="button" onClick={resetGame}>
               New game
@@ -302,38 +298,6 @@ function PlayModeToggle({ playMode, onPlayModeChange }: PlayModeToggleProps) {
           onClick={() => onPlayModeChange('online')}
         >
           Online
-        </button>
-      </div>
-    </div>
-  )
-}
-
-type CardArtworkToggleProps = {
-  artworkStyle: CardArtworkStyle
-  onArtworkStyleChange: (artworkStyle: CardArtworkStyle) => void
-}
-
-function CardArtworkToggle({
-  artworkStyle,
-  onArtworkStyleChange,
-}: CardArtworkToggleProps) {
-  return (
-    <div className="card-art-toggle">
-      <span>Card art</span>
-      <div className="segmented-control" aria-label="Card artwork style">
-        <button
-          className={artworkStyle === 'standard' ? 'active' : ''}
-          type="button"
-          onClick={() => onArtworkStyleChange('standard')}
-        >
-          Standard
-        </button>
-        <button
-          className={artworkStyle === 'simple' ? 'active' : ''}
-          type="button"
-          onClick={() => onArtworkStyleChange('simple')}
-        >
-          Simple
         </button>
       </div>
     </div>
@@ -539,6 +503,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     useState<OnlineConnectionStatus>('idle')
   const [playerName, setPlayerName] = useState(loadOnlinePlayerName)
   const [turnTimerSeconds, setTurnTimerSeconds] = useState(60)
+  const [gameOverScore, setGameOverScore] = useState(100)
   const [joinRoomCode, setJoinRoomCode] = useState('')
   const [room, setRoom] = useState<OnlineRoomView | null>(null)
   const [serverMessage, setServerMessage] = useState(
@@ -677,6 +642,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
       type: 'CREATE_ROOM',
       name: playerName,
       turnTimerSeconds,
+      gameOverScore,
     })
   }
 
@@ -820,6 +786,21 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
           ))}
         </select>
 
+        <label className="field-label" htmlFor="game-over-score">
+          End game limit
+        </label>
+        <select
+          id="game-over-score"
+          value={gameOverScore}
+          onChange={(event) => setGameOverScore(Number(event.target.value))}
+        >
+          {GAME_OVER_SCORE_OPTIONS.map((score) => (
+            <option key={score} value={score}>
+              {score} points
+            </option>
+          ))}
+        </select>
+
         <div className="online-actions-grid">
           <button className="primary-button" type="button" onClick={createOnlineRoom}>
             Create room
@@ -918,6 +899,7 @@ function OnlineRoomBar({
         <span>{connectionStatus}</span>
         <span>{room.players.length} players</span>
         <span>Timer: {formatTimerSeconds(room.turnTimerSeconds)}</span>
+        <span>Limit: {room.gameOverScore}</span>
         {substituteCount > 0 && (
           <span>{formatCount(substituteCount, 'BOT substitute')}</span>
         )}
@@ -1013,6 +995,7 @@ function OnlineLobby({
       <div className="online-room-meta">
         <span>Status: {connectionStatus}</span>
         <span>Timer: {formatTimerSeconds(room.turnTimerSeconds)}</span>
+        <span>Limit: {room.gameOverScore}</span>
         <span>{isHost ? 'You are host' : 'Waiting for host'}</span>
       </div>
 
@@ -1133,7 +1116,7 @@ function OnlineRulesPanel() {
         <li>The server owns the deck, hands, turns, and scores.</li>
         <li>Each player only receives their own hand while a round is active.</li>
         <li>Friends join with a room code.</li>
-        <li>The host chooses a turn timer, adds BOT players, kicks humans, and can delete the room.</li>
+        <li>The host chooses the turn timer and point limit, adds BOTs, kicks humans, and can delete the room.</li>
         <li>Humans must mark ready before the host can start the game.</li>
         <li>Disconnected players time out once, then a BOT plays their seat until they rejoin.</li>
         <li>Inactive rooms are removed after 15 minutes without connected humans.</li>
@@ -1178,12 +1161,14 @@ function GameScreen({
   onReset,
 }: GameScreenProps) {
   useGanjiResultAudio(state)
+  useDiscardAudio(state)
 
   const revealedPlayerId = viewerPlayerId
     ? viewerPlayerId
     : handVisible && currentPlayer && !currentPlayer.isBot
       ? currentPlayer.id
       : null
+  const perspectivePlayerId = viewerPlayerId ?? currentPlayer?.id ?? null
 
   return (
     <div className={`game-layout${state.status === 'playing' ? ' active-game-layout' : ''}`}>
@@ -1208,6 +1193,7 @@ function GameScreen({
             <TableSurface
               state={state}
               currentPlayerId={currentPlayer.id}
+              perspectivePlayerId={perspectivePlayerId}
               revealedPlayerId={revealedPlayerId}
               cardArtworkStyle={cardArtworkStyle}
               selectedCardIds={selectedCardIds}
@@ -1257,6 +1243,10 @@ function useGanjiResultAudio(state: GameState) {
   const playedResultKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
+    if (state.status !== 'roundOver' && state.status !== 'gameOver') {
+      return
+    }
+
     const summary = state.roundSummary
     if (!summary) {
       return
@@ -1268,19 +1258,55 @@ function useGanjiResultAudio(state: GameState) {
     }
 
     playedResultKeyRef.current = resultKey
-    const audio = new Audio(
-      summary.callerHadLowest ? GANJI_SUCCESS_AUDIO : GANJI_FAIL_AUDIO,
-    )
+    const audio = new Audio(summary.callerHadLowest ? GANJI_SUCCESS_AUDIO : GANJI_FAIL_AUDIO)
 
     audio.play().catch(() => {
       // Browsers can block audio until the user interacts with the page.
     })
-  }, [state.roundSummary])
+  }, [state.roundSummary, state.status])
+}
+
+function useDiscardAudio(state: GameState) {
+  const playedDiscardKeyRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (state.status !== 'playing' || !state.pendingNextOffer) {
+      return
+    }
+
+    const discard = state.pendingNextOffer
+    const discardKey = `${state.roundNumber}:${discard.fromPlayerId}:${discard.card.id}:${discard.discardedCount}`
+    if (playedDiscardKeyRef.current === discardKey) {
+      return
+    }
+
+    playedDiscardKeyRef.current = discardKey
+    playDiscardAudio(discard.discardedCount)
+  }, [state.pendingNextOffer, state.roundNumber, state.status])
+}
+
+function playDiscardAudio(discardedCount: number) {
+  const normalizedCount = Math.min(4, Math.max(1, discardedCount)) as keyof typeof DISCARD_AUDIO_BY_COUNT
+  const audioPath = DISCARD_AUDIO_BY_COUNT[normalizedCount]
+  const audio = new Audio(audioPath)
+  audio.volume = DISCARD_AUDIO_VOLUME_BY_COUNT[normalizedCount]
+
+  audio.play().catch(() => {
+    // Browsers can block audio until the user interacts with the page.
+  })
+
+  if (discardedCount === 3) {
+    window.setTimeout(() => {
+      audio.pause()
+      audio.currentTime = 0
+    }, 2000)
+  }
 }
 
 type TableSurfaceProps = {
   state: GameState
   currentPlayerId: string
+  perspectivePlayerId: string | null
   revealedPlayerId: string | null
   cardArtworkStyle: CardArtworkStyle
   selectedCardIds: string[]
@@ -1293,6 +1319,7 @@ type TableSurfaceProps = {
 function TableSurface({
   state,
   currentPlayerId,
+  perspectivePlayerId,
   revealedPlayerId,
   cardArtworkStyle,
   selectedCardIds,
@@ -1310,6 +1337,7 @@ function TableSurface({
       <PlayerHandsOnTable
         players={state.players}
         currentPlayerId={currentPlayerId}
+        perspectivePlayerId={perspectivePlayerId}
         revealedPlayerId={revealedPlayerId}
         cardArtworkStyle={cardArtworkStyle}
         selectedCardIds={selectedCardIds}
@@ -1333,9 +1361,6 @@ function TableSurface({
                 : `${state.discardPile.length} buried cards reshuffle`
               : 'Empty'}
           </span>
-          <span className="slot-action">
-            {state.phase === 'draw' ? 'Draw from deck' : 'Available after discard'}
-          </span>
         </button>
 
         <button
@@ -1357,14 +1382,7 @@ function TableSurface({
           <span className="slot-meta">
             {latestDiscard
               ? `From ${latestDiscard.fromPlayerName}`
-              : 'First turn has no discard'}
-          </span>
-          <span className="slot-action">
-            {state.phase === 'draw'
-              ? latestDiscard
-                ? 'Draw this card'
-                : 'No card to draw'
-              : 'You can see this before discarding'}
+              : 'No discard'}
           </span>
         </button>
 
@@ -1381,10 +1399,9 @@ function TableSurface({
           )}
           <span className="slot-meta">
             {justDiscarded
-              ? `For the next player from ${justDiscarded.fromPlayerName}`
-              : 'Your discard will land here'}
+              ? `From ${justDiscarded.fromPlayerName}`
+              : 'Waiting'}
           </span>
-          <span className="slot-action">Not drawable this turn</span>
         </div>
       </div>
     </section>
@@ -1394,6 +1411,7 @@ function TableSurface({
 type PlayerHandsOnTableProps = {
   players: Player[]
   currentPlayerId: string
+  perspectivePlayerId: string | null
   revealedPlayerId: string | null
   cardArtworkStyle: CardArtworkStyle
   selectedCardIds: string[]
@@ -1405,6 +1423,7 @@ type PlayerHandsOnTableProps = {
 function PlayerHandsOnTable({
   players,
   currentPlayerId,
+  perspectivePlayerId,
   revealedPlayerId,
   cardArtworkStyle,
   selectedCardIds,
@@ -1418,7 +1437,7 @@ function PlayerHandsOnTable({
         const isCurrent = player.id === currentPlayerId
         const isRevealed = player.id === revealedPlayerId
         const isSelectable = isRevealed && player.id === selectablePlayerId
-        const seatStyle = getPlayerSeatStyle(players.length, index)
+        const seatStyle = getPlayerSeatStyle(players, index, perspectivePlayerId)
 
         return (
           <section
@@ -1435,7 +1454,6 @@ function PlayerHandsOnTable({
               </span>
               <div>
                 <strong>{player.name}</strong>
-                <span>{formatCount(player.hand.length, 'card')}</span>
               </div>
             </div>
             <div className="mini-card-row">
@@ -1473,11 +1491,20 @@ type SeatStyle = CSSProperties & {
   '--seat-y': string
 }
 
-function getPlayerSeatStyle(playerCount: number, playerIndex: number): SeatStyle {
-  const startAngle = 135
-  const angle = ((startAngle + (360 / playerCount) * playerIndex) * Math.PI) / 180
-  const x = 50 + 43 * Math.cos(angle)
-  const y = 50 + 39 * Math.sin(angle)
+function getPlayerSeatStyle(
+  players: Player[],
+  playerIndex: number,
+  perspectivePlayerId: string | null,
+): SeatStyle {
+  const perspectiveIndex = Math.max(
+    0,
+    players.findIndex((player) => player.id === perspectivePlayerId),
+  )
+  const seatOffset =
+    (playerIndex - perspectiveIndex + players.length) % players.length
+  const angle = ((90 + (360 / players.length) * seatOffset) * Math.PI) / 180
+  const x = 50 + 39 * Math.cos(angle)
+  const y = 50 + 35 * Math.sin(angle)
 
   return {
     '--seat-x': `${x}%`,
@@ -1584,32 +1611,21 @@ function TableActionArea({
   if (humanHandHidden) {
     return (
       <div className="table-action-area privacy-card">
+        <button className="primary-button" type="button" onClick={onShowHand}>
+          Unhide {player.name}'s cards
+        </button>
         <p>
           Pass the laptop to {player.name}, then reveal the cards when other
           players are not looking.
         </p>
-        <button className="primary-button" type="button" onClick={onShowHand}>
-          Unhide {player.name}'s cards
-        </button>
       </div>
     )
   }
 
   return (
     <div className="table-action-area">
-      <PhaseBanner phase={state.phase} />
-
       {state.phase === 'discard' && (
         <div className="action-panel">
-          <p>
-            Select one card, or several cards with the same value. Selected:{' '}
-            {selectedCards.length === 0
-              ? 'none'
-              : selectedCards.map(cardLabel).join(', ')}
-          </p>
-          {selectedCards.length > 1 && !selectedCardsAreValid && (
-            <p className="warning-text">Selected cards do not share one value.</p>
-          )}
           <div className="button-row">
             <button
               className="primary-button"
@@ -1624,17 +1640,29 @@ function TableActionArea({
               onCall={onCallGanji}
             />
           </div>
+          <PhaseBanner phase={state.phase} />
+          <p>
+            Select one card, or several cards with the same value. Selected:{' '}
+            {selectedCards.length === 0
+              ? 'none'
+              : selectedCards.map(cardLabel).join(', ')}
+          </p>
+          {selectedCards.length > 1 && !selectedCardsAreValid && (
+            <p className="warning-text">Selected cards do not share one value.</p>
+          )}
         </div>
       )}
 
       {state.phase === 'draw' && (
         <div className="action-panel">
+          <PhaseBanner phase={state.phase} />
           <DrawChoices state={state} />
         </div>
       )}
 
       {state.phase === 'postDraw' && (
         <div className="action-panel">
+          <PhaseBanner phase={state.phase} />
           <p>
             You drew one card. Your turn will pass automatically.
           </p>
@@ -1653,7 +1681,7 @@ function DrawChoices({ state }: DrawChoicesProps) {
 
   return (
     <>
-      <p>Draw exactly one card from the table above.</p>
+      <p>Draw one card from the table.</p>
       <div className="draw-reminder">
         <span>
           Main deck:{' '}
@@ -1715,7 +1743,7 @@ function Scoreboard({ state }: ScoreboardProps) {
   return (
     <aside className="scoreboard panel">
       <div className="section-heading">
-        <p className="eyebrow">Race to avoid {GAME_OVER_SCORE}</p>
+        <p className="eyebrow">Race to avoid {state.gameOverScore}</p>
         <h2>Scores</h2>
       </div>
       <div className="score-list">
@@ -1809,7 +1837,7 @@ function GameOver({ state, cardArtworkStyle, onReset }: GameOverProps) {
           </h2>
         </div>
         <p>
-          Someone reached {GAME_OVER_SCORE}+ total points. Lowest total score wins.
+          Someone reached {state.gameOverScore}+ total points. Lowest total score wins.
         </p>
       </div>
 
@@ -1993,7 +2021,7 @@ function RulesPanel() {
         <li>Only the last card discarded by the previous player can be drawn.</li>
         <li>Ganji can be called only as the first action of your turn.</li>
         <li>Your hand value must be 5 or less to call Ganji.</li>
-        <li>The game ends when any player reaches 100 or more total points.</li>
+        <li>The game ends when any player reaches the selected point limit.</li>
       </ul>
     </aside>
   )
@@ -2104,16 +2132,6 @@ function createDefaultPlayers(): SetupPlayerConfig[] {
   }))
 }
 
-function loadCardArtworkStyle(): CardArtworkStyle {
-  try {
-    return localStorage.getItem(CARD_ARTWORK_STORAGE_KEY) === 'simple'
-      ? 'simple'
-      : 'standard'
-  } catch {
-    return 'standard'
-  }
-}
-
 function getWebSocketUrl(): string {
   const configuredUrl = import.meta.env.VITE_WS_URL as string | undefined
   if (configuredUrl) {
@@ -2174,7 +2192,10 @@ function loadSavedGame(): GameState {
 
     const parsedGame = JSON.parse(savedGame) as GameState
     if (Array.isArray(parsedGame.players) && parsedGame.players.length >= MIN_PLAYERS) {
-      return parsedGame
+      return {
+        ...parsedGame,
+        gameOverScore: parsedGame.gameOverScore ?? 100,
+      }
     }
   } catch {
     localStorage.removeItem(STORAGE_KEY)

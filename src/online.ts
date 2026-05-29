@@ -17,12 +17,13 @@ export type OnlineRoomView = {
   viewerPlayerId: string
   hostPlayerId: string
   turnTimerSeconds: number
+  gameOverScore: number
   turnDeadline: number | null
   message: string
 }
 
 export type ClientToServerMessage =
-  | { type: 'CREATE_ROOM'; name: string; turnTimerSeconds: number }
+  | { type: 'CREATE_ROOM'; name: string; turnTimerSeconds: number; gameOverScore: number }
   | { type: 'JOIN_ROOM'; roomCode: string; name: string }
   | { type: 'REJOIN_ROOM'; roomCode: string; sessionId: string }
   | { type: 'ADD_BOT' }

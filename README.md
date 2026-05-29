@@ -41,7 +41,7 @@ bun run dev
 ```
 
 Open the Vite URL, switch `Play mode` to `Online`, then create or join a room.
-The host chooses a 30, 60, 90, or 120 second turn timer when creating the room.
+The host chooses a 30, 60, 90, or 120 second turn timer and a 50, 100, 150, or 200 point end-game limit when creating the room.
 
 For production-style local testing:
 
@@ -111,6 +111,7 @@ docker compose down
 - Three to six players.
 - Human and BOT players.
 - Four cards dealt to each player at the start of each round.
+- The first player rotates each round.
 - Card values: Ace 1, number cards face value, Jack 11, Queen 12, King 13.
 - King of spades and king of clubs are worth 0.
 - Each turn discards one card or multiple cards with the same value, then draws one card.
@@ -118,7 +119,7 @@ docker compose down
 - If the deck runs out, buried discards are shuffled back into the deck while the latest discard remains available.
 - A player may call GANJI only as the first action of their turn.
 - A player must have hand value 5 or less to call GANJI.
-- Online rooms use a host-selected turn timer and auto-play a discard or draw when time expires.
+- Online rooms use a host-selected turn timer and point limit, and auto-play a discard or draw when time expires.
 - Online joined humans must mark ready before the host can start; host and BOTs are always ready.
 - Online hosts can kick human players from the lobby, and kicked players can rejoin by room code.
 - Online hosts can delete their room.
@@ -126,6 +127,6 @@ docker compose down
 - Online rooms are removed after 15 minutes with no connected humans.
 - Successful GANJI gives the caller 0 round points when they have or share the lowest hand value.
 - Failed GANJI gives the caller their hand value plus 25 penalty points.
-- Game ends when any player reaches 100 or more total points; lowest total score wins.
+- Game ends when any player reaches the selected point limit or more; lowest total score wins.
 
 Game state is saved in `localStorage`, so refreshing the browser resumes the current game.

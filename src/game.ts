@@ -2,6 +2,7 @@ export const MIN_PLAYERS = 3
 export const MAX_PLAYERS = 6
 export const GANJI_LIMIT = 5
 export const GAME_OVER_SCORE = 100
+export const GAME_OVER_SCORE_OPTIONS = [50, 100, 150, 200] as const
 
 export type Suit = 'spades' | 'hearts' | 'diamonds' | 'clubs'
 export type Rank =
@@ -80,6 +81,7 @@ export type GameState = {
   pendingNextOffer: DrawOffer | null
   currentPlayerIndex: number
   roundNumber: number
+  gameOverScore: number
   roundSummary: RoundSummary | null
   winnerIds: string[]
   message: string
@@ -88,7 +90,7 @@ export type GameState = {
 export type DrawSource = 'deck' | 'discard'
 
 export type GameAction =
-  | { type: 'START_GAME'; players: SetupPlayerConfig[] }
+  | { type: 'START_GAME'; players: SetupPlayerConfig[]; gameOverScore?: number }
   | { type: 'DISCARD_CARDS'; cardIds: string[] }
   | { type: 'DRAW_CARD'; source: DrawSource }
   | { type: 'END_TURN' }
@@ -153,6 +155,7 @@ export const initialGameState: GameState = {
   pendingNextOffer: null,
   currentPlayerIndex: 0,
   roundNumber: 0,
+  gameOverScore: GAME_OVER_SCORE,
   roundSummary: null,
   winnerIds: [],
   message: 'Choose players to start Ganji.',
@@ -175,7 +178,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         return withMessage(state, `Ganji needs at least ${MIN_PLAYERS} players.`)
       }
 
-      return startRound(players, 1)
+      return startRound(players, 1, normalizeGameOverScore(action.gameOverScore))
     }
 
     case 'DISCARD_CARDS': {
@@ -343,7 +346,7 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
         return withMessage(state, 'The current round is still in progress.')
       }
 
-      return startRound(state.players, state.roundNumber + 1)
+      return startRound(state.players, state.roundNumber + 1, state.gameOverScore)
     }
 
     case 'RESET_GAME':
@@ -430,7 +433,17 @@ export function formatCount(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? '' : 's'}`
 }
 
-function startRound(players: Player[], roundNumber: number): GameState {
+export function normalizeGameOverScore(score: number | undefined): number {
+  return typeof score === 'number' && GAME_OVER_SCORE_OPTIONS.some((option) => option === score)
+    ? score
+    : GAME_OVER_SCORE
+}
+
+function startRound(
+  players: Player[],
+  roundNumber: number,
+  gameOverScore: number,
+): GameState {
   const deck = shuffle(createDeck())
   const roundPlayers = players.map((player): Player => ({ ...player, hand: [] }))
 
@@ -442,6 +455,8 @@ function startRound(players: Player[], roundNumber: number): GameState {
       }
     }
   }
+  const currentPlayerIndex = (roundNumber - 1) % roundPlayers.length
+  const startingPlayer = roundPlayers[currentPlayerIndex]
 
   return {
     status: 'playing',
@@ -451,11 +466,12 @@ function startRound(players: Player[], roundNumber: number): GameState {
     discardPile: [],
     drawOffer: null,
     pendingNextOffer: null,
-    currentPlayerIndex: 0,
+    currentPlayerIndex,
     roundNumber,
+    gameOverScore,
     roundSummary: null,
     winnerIds: [],
-    message: `Round ${roundNumber} started. ${roundPlayers[0].name} takes the first turn.`,
+    message: `Round ${roundNumber} started. ${startingPlayer.name} takes the first turn.`,
   }
 }
 
@@ -495,7 +511,7 @@ function finishRound(state: GameState, caller: Player): GameState {
       totalScore: score?.totalScore ?? player.totalScore,
     }
   })
-  const gameOver = players.some((player) => player.totalScore >= GAME_OVER_SCORE)
+  const gameOver = players.some((player) => player.totalScore >= state.gameOverScore)
   const lowestTotal = Math.min(...players.map((player) => player.totalScore))
   const winnerIds = gameOver
     ? players

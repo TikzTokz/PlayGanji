@@ -4,6 +4,26 @@
   padding: 32px 0 48px;
 }
 
+.app-shell:has(.active-game-layout) {
+  width: min(1500px, calc(100% - 16px));
+  padding: 10px 0 16px;
+}
+
+.app-shell:has(.active-game-layout) .app-header {
+  align-items: center;
+  padding: 14px 18px;
+  border-radius: 22px;
+}
+
+.app-shell:has(.active-game-layout) .app-header h1 {
+  margin: 2px 0 0;
+  font-size: clamp(38px, 5vw, 64px);
+}
+
+.app-shell:has(.active-game-layout) .lede {
+  display: none;
+}
+
 .app-header {
   display: flex;
   align-items: flex-start;
@@ -168,6 +188,7 @@
 .active-game-layout {
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
+  margin-top: 10px;
 }
 
 .panel,
@@ -538,7 +559,22 @@ button:disabled {
 
 .active-game-layout .table-panel {
   order: 1;
+  overflow: hidden;
   padding: clamp(10px, 1.8vw, 18px);
+}
+
+.active-game-layout .table-status {
+  align-items: center;
+}
+
+.active-game-layout .table-status h2 {
+  font-size: clamp(1.25rem, 2.2vw, 1.8rem);
+}
+
+.active-game-layout .message-bar {
+  margin: 8px 0;
+  padding: 8px 10px;
+  font-size: 0.82rem;
 }
 
 .score-list {
@@ -645,6 +681,11 @@ button:disabled {
     0 30px 90px rgba(0, 0, 0, 0.36);
 }
 
+.active-game-layout .felt-table {
+  width: min(100%, 150svh);
+  margin-inline: auto;
+}
+
 .felt-table::before {
   content: '';
   position: absolute;
@@ -721,7 +762,16 @@ button:disabled {
   align-items: center;
   gap: clamp(5px, 0.8vw, 9px);
   margin-bottom: 5px;
+  max-width: 100%;
   filter: drop-shadow(0 3px 2px rgba(0, 0, 0, 0.55));
+}
+
+.table-player-label > div {
+  max-width: min(170px, 100%);
+  border: 2px solid rgba(9, 9, 13, 0.88);
+  border-radius: 999px;
+  background: rgba(9, 9, 13, 0.68);
+  padding: 4px 8px;
 }
 
 .player-avatar {
@@ -769,6 +819,8 @@ button:disabled {
 }
 
 .table-player-label strong {
+  display: block;
+  overflow-wrap: anywhere;
   color: #fff6d4;
   font-size: clamp(0.62rem, 1vw, 0.85rem);
   line-height: 1;
@@ -862,7 +914,6 @@ button.table-zone:not(:disabled) {
 }
 
 .slot-label,
-.slot-action,
 .slot-meta {
   display: block;
 }
@@ -882,18 +933,6 @@ button.table-zone:not(:disabled) {
   font-size: clamp(0.46rem, 0.75vw, 0.64rem);
   font-weight: 850;
   line-height: 1.05;
-  text-shadow: 2px 2px 0 #09090d;
-}
-
-.slot-action {
-  min-height: 0;
-  border-radius: 0;
-  background: transparent;
-  color: #fff6d4;
-  font-size: clamp(0.42rem, 0.7vw, 0.58rem);
-  font-weight: 950;
-  line-height: 1.05;
-  padding: 0;
   text-shadow: 2px 2px 0 #09090d;
 }
 
@@ -997,14 +1036,14 @@ button.table-zone:not(:disabled) {
 .table-action-area {
   position: relative;
   display: grid;
-  gap: 8px;
+  gap: 4px;
   width: 100%;
-  margin-top: 14px;
+  margin-top: 8px;
   border: 3px solid #09090d;
   border-radius: 22px;
   background: rgba(9, 9, 13, 0.72);
   color: #fff6d4;
-  padding: 12px;
+  padding: 8px;
   box-shadow:
     0 6px 0 #050507,
     inset 0 0 0 2px rgba(255, 255, 255, 0.05);
@@ -1019,12 +1058,26 @@ button.table-zone:not(:disabled) {
 }
 
 .table-action-area .action-panel {
-  padding: 10px;
+  gap: 6px;
+  padding: 6px;
 }
 
 .table-action-area .action-panel p {
-  font-size: 0.86rem;
-  line-height: 1.25;
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.18;
+}
+
+.table-action-area .button-row {
+  align-items: center;
+  justify-content: center;
+}
+
+.table-action-area .phase-banner {
+  padding: 0;
+  color: #d7ecd8;
+  font-size: 0.78rem;
+  line-height: 1.18;
 }
 
 .table-action-area.privacy-card,
@@ -1036,7 +1089,7 @@ button.table-zone:not(:disabled) {
 .table-action-area .primary-button,
 .table-action-area .secondary-button,
 .table-action-area .ganji-button {
-  padding: 9px 12px;
+  padding: 7px 11px;
 }
 
 .turn-card {
@@ -1197,7 +1250,7 @@ button.table-zone:not(:disabled) {
 .draw-reminder {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
 }
 
 .draw-reminder span {
@@ -1205,9 +1258,9 @@ button.table-zone:not(:disabled) {
   border-radius: 999px;
   background: #203a2b;
   color: #fff6d4;
-  font-size: 0.82rem;
+  font-size: 0.72rem;
   font-weight: 900;
-  padding: 8px 10px;
+  padding: 6px 8px;
 }
 
 .discard-offer {
