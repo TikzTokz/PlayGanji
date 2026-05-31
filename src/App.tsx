@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import './App.css'
 import {
   GANJI_LIMIT,
@@ -10,26 +10,30 @@ import {
   cardLabel,
   cardName,
   cardsShareValue,
-  chooseBotDiscard,
-  chooseBotDrawSource,
   formatCount,
-  gameReducer,
-  initialGameState,
   isRedSuit,
   type Card,
   type GameState,
   type Player,
-  type SetupPlayerConfig,
 } from './game'
+import {
+  forgetOnlineSession as forgetStoredOnlineSession,
+  getReconnectDelayMs,
+  isInvalidReconnectMessage,
+  loadOnlinePlayerName,
+  loadSavedOnlineSession,
+  resolveWebSocketUrl,
+  saveOnlinePlayerName,
+  saveOnlineSession,
+  type OnlineConnectionStatus,
+  type SavedOnlineSession,
+} from './onlineConnection'
 import type {
   ClientToServerMessage,
   OnlineRoomView,
   ServerToClientMessage,
 } from './online'
 
-const STORAGE_KEY = 'ganji-game-state-v1'
-const ONLINE_NAME_STORAGE_KEY = 'ganji-online-player-name-v1'
-const ONLINE_SESSION_STORAGE_KEY = 'ganji-online-session-v1'
 const GANJI_SUCCESS_AUDIO = '/audio/Ganji_Success.mp3'
 const GANJI_FAIL_AUDIO = '/audio/Ganji_Fail.mp3'
 const DISCARD_AUDIO_BY_COUNT = {
@@ -77,7 +81,6 @@ const APP_ASSET_URLS = [
   ),
 ]
 
-type PlayMode = 'local' | 'online'
 type CardArtworkStyle = 'standard'
 
 type SelectionState = {
@@ -96,211 +99,23 @@ function App() {
 }
 
 function GanjiApp() {
-  const [state, dispatch] = useReducer(gameReducer, undefined, loadSavedGame)
-  const [playMode, setPlayMode] = useState<PlayMode>('local')
-  const [playerCount, setPlayerCount] = useState(MIN_PLAYERS)
-  const [playerDrafts, setPlayerDrafts] = useState<SetupPlayerConfig[]>(
-    createDefaultPlayers,
-  )
-  const [selection, setSelection] = useState<SelectionState>({
-    turnKey: '',
-    cardIds: [],
-  })
-  const [visibleTurnKey, setVisibleTurnKey] = useState('')
   const cardArtworkStyle: CardArtworkStyle = 'standard'
-
-  const currentPlayer = state.players[state.currentPlayerIndex]
-  const turnKey = `${state.status}:${state.roundNumber}:${currentPlayer?.id ?? 'none'}`
-  const selectedCardIds = selection.turnKey === turnKey ? selection.cardIds : []
-  const handVisible = Boolean(currentPlayer?.isBot || visibleTurnKey === turnKey)
-  const selectedCards = currentPlayer
-    ? currentPlayer.hand.filter((card) => selectedCardIds.includes(card.id))
-    : []
-  const selectedCardsAreValid =
-    selectedCards.length > 0 &&
-    selectedCards.length === selectedCardIds.length &&
-    cardsShareValue(selectedCards)
-
-  useEffect(() => {
-    try {
-      if (state.status === 'setup') {
-        localStorage.removeItem(STORAGE_KEY)
-        return
-      }
-
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-    } catch {
-      // Local save is a convenience, so storage failures should not stop play.
-    }
-  }, [state])
-
-  useEffect(() => {
-    if (playMode !== 'local' || state.status !== 'playing' || !currentPlayer?.isBot) {
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      const handValue = calculateHandValue(currentPlayer.hand)
-
-      if (state.phase === 'discard' && handValue <= GANJI_LIMIT) {
-        dispatch({ type: 'CALL_GANJI' })
-        return
-      }
-
-      if (state.phase === 'discard') {
-        const discardCards = chooseBotDiscard(currentPlayer.hand)
-        dispatch({
-          type: 'DISCARD_CARDS',
-          cardIds: discardCards.map((card) => card.id),
-        })
-        return
-      }
-
-      if (state.phase === 'draw') {
-        dispatch({ type: 'DRAW_CARD', source: chooseBotDrawSource(state) })
-        return
-      }
-
-      dispatch({ type: 'END_TURN' })
-    }, 700)
-
-    return () => window.clearTimeout(timer)
-  }, [currentPlayer, playMode, state])
-
-  function updatePlayerDraft(
-    playerIndex: number,
-    patch: Partial<SetupPlayerConfig>,
-  ) {
-    setPlayerDrafts((players) =>
-      players.map((player, index) =>
-        index === playerIndex ? { ...player, ...patch } : player,
-      ),
-    )
-  }
-
-  function startGame() {
-    dispatch({
-      type: 'START_GAME',
-      players: playerDrafts.slice(0, playerCount),
-    })
-  }
-
-  function toggleCardSelection(card: Card) {
-    if (state.phase !== 'discard' || currentPlayer?.isBot) {
-      return
-    }
-
-    setSelection((currentSelection) => {
-      const cardIds =
-        currentSelection.turnKey === turnKey ? currentSelection.cardIds : []
-
-      return {
-        turnKey,
-        cardIds: cardIds.includes(card.id)
-          ? cardIds.filter((cardId) => cardId !== card.id)
-          : [...cardIds, card.id],
-      }
-    })
-  }
-
-  function discardSelectedCards() {
-    if (!selectedCardsAreValid) {
-      return
-    }
-
-    dispatch({ type: 'DISCARD_CARDS', cardIds: selectedCardIds })
-    setSelection({ turnKey, cardIds: [] })
-  }
-
-  function resetGame() {
-    dispatch({ type: 'RESET_GAME' })
-    setSelection({ turnKey: '', cardIds: [] })
-    setVisibleTurnKey('')
-  }
 
   return (
     <main className="app-shell">
       <header className="app-header">
         <div>
-          <p className="eyebrow">
-            {playMode === 'local'
-              ? 'Local pass-and-play card game'
-              : 'Internet multiplayer card game'}
-          </p>
+          <p className="eyebrow">Internet multiplayer card game</p>
           <h1>Ganji</h1>
           <p className="lede">
             Discard matching values, draw one card, and call Ganji when your hand
             is 5 or less.
           </p>
         </div>
-        <div className="header-actions">
-          <PlayModeToggle playMode={playMode} onPlayModeChange={setPlayMode} />
-          {playMode === 'local' && state.status !== 'setup' && (
-            <button className="ghost-button" type="button" onClick={resetGame}>
-              New game
-            </button>
-          )}
-        </div>
       </header>
 
-      {playMode === 'online' ? (
-        <OnlineMultiplayer cardArtworkStyle={cardArtworkStyle} />
-      ) : state.status === 'setup' ? (
-        <SetupScreen
-          playerCount={playerCount}
-          players={playerDrafts}
-          onPlayerCountChange={setPlayerCount}
-          onPlayerChange={updatePlayerDraft}
-          onStart={startGame}
-        />
-      ) : (
-        <GameScreen
-          state={state}
-          currentPlayer={currentPlayer}
-          cardArtworkStyle={cardArtworkStyle}
-          handVisible={handVisible}
-          selectedCardIds={selectedCardIds}
-          selectedCardsAreValid={selectedCardsAreValid}
-          onShowHand={() => setVisibleTurnKey(turnKey)}
-          onToggleCard={toggleCardSelection}
-          onDiscard={discardSelectedCards}
-          onDrawDeck={() => dispatch({ type: 'DRAW_CARD', source: 'deck' })}
-          onDrawDiscard={() => dispatch({ type: 'DRAW_CARD', source: 'discard' })}
-          onCallGanji={() => dispatch({ type: 'CALL_GANJI' })}
-          onNextRound={() => dispatch({ type: 'START_NEXT_ROUND' })}
-          onReset={resetGame}
-        />
-      )}
+      <OnlineMultiplayer cardArtworkStyle={cardArtworkStyle} />
     </main>
-  )
-}
-
-type PlayModeToggleProps = {
-  playMode: PlayMode
-  onPlayModeChange: (playMode: PlayMode) => void
-}
-
-function PlayModeToggle({ playMode, onPlayModeChange }: PlayModeToggleProps) {
-  return (
-    <div className="card-art-toggle">
-      <span>Play mode</span>
-      <div className="segmented-control" aria-label="Play mode">
-        <button
-          className={playMode === 'local' ? 'active' : ''}
-          type="button"
-          onClick={() => onPlayModeChange('local')}
-        >
-          Local
-        </button>
-        <button
-          className={playMode === 'online' ? 'active' : ''}
-          type="button"
-          onClick={() => onPlayModeChange('online')}
-        >
-          Online
-        </button>
-      </div>
-    </div>
   )
 }
 
@@ -398,110 +213,20 @@ function preloadAudio(assetUrl: string): Promise<void> {
   })
 }
 
-type SetupScreenProps = {
-  playerCount: number
-  players: SetupPlayerConfig[]
-  onPlayerCountChange: (playerCount: number) => void
-  onPlayerChange: (
-    playerIndex: number,
-    patch: Partial<SetupPlayerConfig>,
-  ) => void
-  onStart: () => void
-}
-
-function SetupScreen({
-  playerCount,
-  players,
-  onPlayerCountChange,
-  onPlayerChange,
-  onStart,
-}: SetupScreenProps) {
-  return (
-    <section className="setup-grid">
-      <div className="panel setup-panel">
-        <div className="section-heading">
-          <p className="eyebrow">Setup</p>
-          <h2>Choose players</h2>
-        </div>
-
-        <label className="field-label" htmlFor="player-count">
-          Number of players
-        </label>
-        <select
-          id="player-count"
-          value={playerCount}
-          onChange={(event) => onPlayerCountChange(Number(event.target.value))}
-        >
-          {Array.from(
-            { length: MAX_PLAYERS - MIN_PLAYERS + 1 },
-            (_, index) => MIN_PLAYERS + index,
-          ).map((count) => (
-            <option key={count} value={count}>
-              {count} players
-            </option>
-          ))}
-        </select>
-
-        <div className="player-config-list">
-          {players.slice(0, playerCount).map((player, index) => (
-            <div className="player-config" key={index}>
-              <label className="field-label" htmlFor={`player-${index}`}>
-                Player {index + 1}
-              </label>
-              <input
-                id={`player-${index}`}
-                type="text"
-                value={player.name}
-                onChange={(event) =>
-                  onPlayerChange(index, { name: event.target.value })
-                }
-              />
-              <div className="segmented-control" aria-label={`Player ${index + 1} type`}>
-                <button
-                  className={!player.isBot ? 'active' : ''}
-                  type="button"
-                  onClick={() => onPlayerChange(index, { isBot: false })}
-                >
-                  Human
-                </button>
-                <button
-                  className={player.isBot ? 'active' : ''}
-                  type="button"
-                  onClick={() => onPlayerChange(index, { isBot: true })}
-                >
-                  BOT
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <button className="primary-button" type="button" onClick={onStart}>
-          Start Ganji
-        </button>
-      </div>
-
-      <RulesPanel />
-    </section>
-  )
-}
-
 type OnlineMultiplayerProps = {
   cardArtworkStyle: CardArtworkStyle
 }
 
-type OnlineConnectionStatus = 'idle' | 'connecting' | 'connected' | 'disconnected'
-
-type SavedOnlineSession = {
-  roomCode: string
-  sessionId: string
-}
-
 function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   const socketRef = useRef<WebSocket | null>(null)
+  const reconnectTimerRef = useRef<number | null>(null)
+  const reconnectAttemptRef = useRef(0)
+  const intentionalCloseRef = useRef(false)
+  const roomRef = useRef<OnlineRoomView | null>(null)
+  const savedSessionRef = useRef<SavedOnlineSession | null>(null)
   const [connectionStatus, setConnectionStatus] =
     useState<OnlineConnectionStatus>('idle')
-  const [playerName, setPlayerName] = useState(loadOnlinePlayerName)
+  const [playerName, setPlayerName] = useState(() => loadOnlinePlayerName(localStorage))
   const [turnTimerSeconds, setTurnTimerSeconds] = useState(60)
   const [gameOverScore, setGameOverScore] = useState(100)
   const [joinRoomCode, setJoinRoomCode] = useState('')
@@ -510,7 +235,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     'Create an online room or join one with a code.',
   )
   const [savedSession, setSavedSession] = useState<SavedOnlineSession | null>(
-    loadSavedOnlineSession,
+    () => loadSavedOnlineSession(localStorage),
   )
   const [selection, setSelection] = useState<SelectionState>({
     turnKey: '',
@@ -534,23 +259,58 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     selectedCards.length > 0 &&
     selectedCards.length === selectedCardIds.length &&
     cardsShareValue(selectedCards)
+  const actionsDisabled = connectionStatus !== 'connected'
 
   useEffect(() => {
-    try {
-      localStorage.setItem(ONLINE_NAME_STORAGE_KEY, playerName)
-    } catch {
-      // The typed player name is convenient, not required.
-    }
+    roomRef.current = room
+  }, [room])
+
+  useEffect(() => {
+    savedSessionRef.current = savedSession
+  }, [savedSession])
+
+  useEffect(() => {
+    saveOnlinePlayerName(localStorage, playerName)
   }, [playerName])
 
   useEffect(() => {
-    return () => socketRef.current?.close()
+    return () => {
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
+      intentionalCloseRef.current = true
+      socketRef.current?.close()
+    }
   }, [])
 
-  function connectWithMessage(message: ClientToServerMessage) {
+  function clearReconnectTimer() {
+    if (reconnectTimerRef.current === null) {
+      return
+    }
+
+    window.clearTimeout(reconnectTimerRef.current)
+    reconnectTimerRef.current = null
+  }
+
+  function connectWithMessage(
+    message: ClientToServerMessage,
+    status: Extract<OnlineConnectionStatus, 'connecting' | 'reconnecting'> = 'connecting',
+    resetReconnectAttempts = true,
+  ) {
+    clearReconnectTimer()
+    if (resetReconnectAttempts) {
+      reconnectAttemptRef.current = 0
+    }
+
+    intentionalCloseRef.current = false
     socketRef.current?.close()
-    setConnectionStatus('connecting')
-    setServerMessage('Connecting to Ganji server...')
+    setConnectionStatus(status)
+    setServerMessage(
+      status === 'reconnecting'
+        ? 'Connection lost. Reconnecting to Ganji server...'
+        : 'Connecting to Ganji server...',
+    )
 
     const socket = new WebSocket(getWebSocketUrl())
     socketRef.current = socket
@@ -561,6 +321,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
       }
 
       setConnectionStatus('connected')
+      reconnectAttemptRef.current = 0
       socket.send(JSON.stringify(message))
     })
 
@@ -581,6 +342,17 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
         return
       }
 
+      socketRef.current = null
+
+      if (intentionalCloseRef.current) {
+        return
+      }
+
+      if (roomRef.current && savedSessionRef.current) {
+        scheduleAutoReconnect()
+        return
+      }
+
       setConnectionStatus('disconnected')
       setServerMessage('Disconnected from the Ganji server.')
     })
@@ -594,6 +366,32 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     })
   }
 
+  function scheduleAutoReconnect() {
+    const reconnectSession = savedSessionRef.current
+    if (!reconnectSession) {
+      setConnectionStatus('disconnected')
+      setServerMessage('Disconnected from the Ganji server.')
+      return
+    }
+
+    const delay = getReconnectDelayMs(reconnectAttemptRef.current)
+    reconnectAttemptRef.current += 1
+    setConnectionStatus('reconnecting')
+    setServerMessage(`Connection lost. Reconnecting in ${Math.ceil(delay / 1000)}s...`)
+    clearReconnectTimer()
+    reconnectTimerRef.current = window.setTimeout(() => {
+      connectWithMessage(
+        {
+          type: 'REJOIN_ROOM',
+          roomCode: reconnectSession.roomCode,
+          sessionId: reconnectSession.sessionId,
+        },
+        'reconnecting',
+        false,
+      )
+    }, delay)
+  }
+
   function handleOnlineServerMessage(rawMessage: string) {
     let message: ServerToClientMessage
 
@@ -605,18 +403,36 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     }
 
     if (message.type === 'ERROR') {
+      if (isInvalidReconnectMessage(message.message)) {
+        clearReconnectTimer()
+        roomRef.current = null
+        savedSessionRef.current = null
+        setRoom(null)
+        setSelection({ turnKey: '', cardIds: [] })
+        setConnectionStatus('disconnected')
+        forgetOnlineSession()
+      }
+
       setServerMessage(message.message)
       return
     }
 
     if (message.type === 'ROOM_CLOSED') {
+      clearReconnectTimer()
+      roomRef.current = null
+      savedSessionRef.current = null
       setRoom(null)
       setSelection({ turnKey: '', cardIds: [] })
+      setConnectionStatus('disconnected')
       setServerMessage(message.message)
       forgetOnlineSession()
       return
     }
 
+    clearReconnectTimer()
+    reconnectAttemptRef.current = 0
+    setConnectionStatus('connected')
+    roomRef.current = message.room
     setRoom(message.room)
     setServerMessage(message.room.message)
 
@@ -624,8 +440,9 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
       roomCode: message.room.roomCode,
       sessionId: message.sessionId,
     }
+    savedSessionRef.current = session
     setSavedSession(session)
-    saveOnlineSession(session)
+    saveOnlineSession(localStorage, session)
   }
 
   function sendOnlineMessage(message: ClientToServerMessage) {
@@ -638,6 +455,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   }
 
   function createOnlineRoom() {
+    clearReconnectTimer()
     connectWithMessage({
       type: 'CREATE_ROOM',
       name: playerName,
@@ -647,9 +465,12 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   }
 
   function leaveOnlineRoom() {
+    clearReconnectTimer()
+    intentionalCloseRef.current = true
     const socket = socketRef.current
     socketRef.current = null
     socket?.close()
+    roomRef.current = null
     setRoom(null)
     setSelection({ turnKey: '', cardIds: [] })
     setConnectionStatus('idle')
@@ -661,6 +482,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   }
 
   function joinOnlineRoom() {
+    clearReconnectTimer()
     connectWithMessage({
       type: 'JOIN_ROOM',
       roomCode: joinRoomCode,
@@ -673,6 +495,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
       return
     }
 
+    clearReconnectTimer()
     connectWithMessage({
       type: 'REJOIN_ROOM',
       roomCode: savedSession.roomCode,
@@ -681,17 +504,14 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   }
 
   function forgetOnlineSession() {
-    try {
-      localStorage.removeItem(ONLINE_SESSION_STORAGE_KEY)
-    } catch {
-      // Clearing saved reconnect data is optional.
-    }
-
+    clearReconnectTimer()
+    forgetStoredOnlineSession(localStorage)
+    savedSessionRef.current = null
     setSavedSession(null)
   }
 
   function toggleOnlineCard(card: Card) {
-    if (!gameState || gameState.phase !== 'discard' || !isViewerTurn) {
+    if (actionsDisabled || !gameState || gameState.phase !== 'discard' || !isViewerTurn) {
       return
     }
 
@@ -709,7 +529,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   }
 
   function discardOnlineCards() {
-    if (!selectedCardsAreValid) {
+    if (actionsDisabled || !selectedCardsAreValid) {
       return
     }
 
@@ -723,6 +543,8 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
         <OnlineRoomBar
           room={room}
           connectionStatus={connectionStatus}
+          connectionMessage={serverMessage}
+          actionsDisabled={actionsDisabled}
           onCreateRoom={createOnlineRoom}
           onDeleteRoom={deleteOnlineRoom}
           onLeaveRoom={leaveOnlineRoom}
@@ -732,6 +554,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
           state={room.gameState}
           currentPlayer={currentPlayer}
           cardArtworkStyle={cardArtworkStyle}
+          actionsDisabled={actionsDisabled}
           viewerPlayerId={room.viewerPlayerId}
           handVisible
           selectedCardIds={selectedCardIds}
@@ -802,7 +625,12 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
         </select>
 
         <div className="online-actions-grid">
-          <button className="primary-button" type="button" onClick={createOnlineRoom}>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={connectionStatus === 'connecting' || connectionStatus === 'reconnecting'}
+            onClick={createOnlineRoom}
+          >
             Create room
           </button>
           <div className="join-room-controls">
@@ -816,7 +644,12 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
               onChange={(event) => setJoinRoomCode(event.target.value.toUpperCase())}
               placeholder="ABC123"
             />
-            <button className="secondary-button" type="button" onClick={joinOnlineRoom}>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={connectionStatus === 'connecting' || connectionStatus === 'reconnecting'}
+              onClick={joinOnlineRoom}
+            >
               Join room
             </button>
           </div>
@@ -832,6 +665,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
               <button
                 className="secondary-button"
                 type="button"
+                disabled={connectionStatus === 'connecting' || connectionStatus === 'reconnecting'}
                 onClick={reconnectOnlineRoom}
               >
                 Reconnect
@@ -847,6 +681,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
           <OnlineLobby
             room={room}
             connectionStatus={connectionStatus}
+            actionsDisabled={actionsDisabled}
             onAddBot={() => sendOnlineMessage({ type: 'ADD_BOT' })}
             onRemoveBot={(playerId) =>
               sendOnlineMessage({ type: 'REMOVE_BOT', playerId })
@@ -871,6 +706,8 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
 type OnlineRoomBarProps = {
   room: OnlineRoomView
   connectionStatus: OnlineConnectionStatus
+  connectionMessage: string
+  actionsDisabled: boolean
   onCreateRoom: () => void
   onDeleteRoom: () => void
   onLeaveRoom: () => void
@@ -880,6 +717,8 @@ type OnlineRoomBarProps = {
 function OnlineRoomBar({
   room,
   connectionStatus,
+  connectionMessage,
+  actionsDisabled,
   onCreateRoom,
   onDeleteRoom,
   onLeaveRoom,
@@ -897,6 +736,7 @@ function OnlineRoomBar({
       </div>
       <div className="online-room-meta">
         <span>{connectionStatus}</span>
+        {connectionStatus !== 'connected' && <span>{connectionMessage}</span>}
         <span>{room.players.length} players</span>
         <span>Timer: {formatTimerSeconds(room.turnTimerSeconds)}</span>
         <span>Limit: {room.gameOverScore}</span>
@@ -914,6 +754,7 @@ function OnlineRoomBar({
           <button
             className="ghost-button danger-button"
             type="button"
+            disabled={actionsDisabled}
             onClick={onDeleteRoom}
           >
             Delete room
@@ -956,6 +797,7 @@ function getRemainingSeconds(turnDeadline: number | null, now = Date.now()): num
 type OnlineLobbyProps = {
   room: OnlineRoomView
   connectionStatus: OnlineConnectionStatus
+  actionsDisabled: boolean
   onAddBot: () => void
   onRemoveBot: (playerId: string) => void
   onKickPlayer: (playerId: string) => void
@@ -969,6 +811,7 @@ type OnlineLobbyProps = {
 function OnlineLobby({
   room,
   connectionStatus,
+  actionsDisabled,
   onAddBot,
   onRemoveBot,
   onKickPlayer,
@@ -1012,6 +855,7 @@ function OnlineLobby({
                   <button
                     className="ghost-button"
                     type="button"
+                    disabled={actionsDisabled}
                     onClick={() => onRemoveBot(player.id)}
                   >
                     Remove
@@ -1020,6 +864,7 @@ function OnlineLobby({
                   <button
                     className="ghost-button"
                     type="button"
+                    disabled={actionsDisabled}
                     onClick={() => onKickPlayer(player.id)}
                   >
                     Kick
@@ -1035,6 +880,7 @@ function OnlineLobby({
         <button
           className={viewer.ready ? 'secondary-button' : 'primary-button'}
           type="button"
+          disabled={actionsDisabled}
           onClick={() => onSetReady(!viewer.ready)}
         >
           {viewer.ready ? 'Cancel ready' : 'Ready'}
@@ -1046,7 +892,7 @@ function OnlineLobby({
           <button
             className="secondary-button"
             type="button"
-            disabled={room.players.length >= MAX_PLAYERS}
+            disabled={actionsDisabled || room.players.length >= MAX_PLAYERS}
             onClick={onAddBot}
           >
             Add BOT
@@ -1054,7 +900,7 @@ function OnlineLobby({
           <button
             className="primary-button"
             type="button"
-            disabled={!canStart}
+            disabled={actionsDisabled || !canStart}
             onClick={onStartGame}
           >
             Start game
@@ -1062,6 +908,7 @@ function OnlineLobby({
           <button
             className="ghost-button danger-button"
             type="button"
+            disabled={actionsDisabled}
             onClick={onDeleteRoom}
           >
             Delete room
@@ -1129,6 +976,7 @@ type GameScreenProps = {
   state: GameState
   currentPlayer: Player | undefined
   cardArtworkStyle: CardArtworkStyle
+  actionsDisabled: boolean
   viewerPlayerId?: string
   handVisible: boolean
   selectedCardIds: string[]
@@ -1147,6 +995,7 @@ function GameScreen({
   state,
   currentPlayer,
   cardArtworkStyle,
+  actionsDisabled,
   viewerPlayerId,
   handVisible,
   selectedCardIds,
@@ -1201,6 +1050,7 @@ function GameScreen({
               onDrawDeck={onDrawDeck}
               onDrawDiscard={onDrawDiscard}
               canUseTableDraws={
+                !actionsDisabled &&
                 (!viewerPlayerId || viewerPlayerId === currentPlayer.id) &&
                 !currentPlayer.isBot
               }
@@ -1210,6 +1060,7 @@ function GameScreen({
               player={currentPlayer}
               viewerPlayerId={viewerPlayerId}
               handVisible={handVisible}
+              actionsDisabled={actionsDisabled}
               selectedCardIds={selectedCardIds}
               selectedCardsAreValid={selectedCardsAreValid}
               onShowHand={onShowHand}
@@ -1223,6 +1074,7 @@ function GameScreen({
           <RoundResult
             state={state}
             cardArtworkStyle={cardArtworkStyle}
+            actionsDisabled={actionsDisabled}
             onNextRound={onNextRound}
           />
         )}
@@ -1563,6 +1415,7 @@ type TableActionAreaProps = {
   player: Player
   viewerPlayerId?: string
   handVisible: boolean
+  actionsDisabled: boolean
   selectedCardIds: string[]
   selectedCardsAreValid: boolean
   onShowHand: () => void
@@ -1575,6 +1428,7 @@ function TableActionArea({
   player,
   viewerPlayerId,
   handVisible,
+  actionsDisabled,
   selectedCardIds,
   selectedCardsAreValid,
   onShowHand,
@@ -1630,13 +1484,14 @@ function TableActionArea({
             <button
               className="primary-button"
               type="button"
-              disabled={!selectedCardsAreValid}
+              disabled={actionsDisabled || !selectedCardsAreValid}
               onClick={onDiscard}
             >
               Discard selected
             </button>
             <GanjiButton
               canCall={canCallGanji}
+              disabled={actionsDisabled}
               onCall={onCallGanji}
             />
           </div>
@@ -1704,15 +1559,16 @@ function DrawChoices({ state }: DrawChoicesProps) {
 
 type GanjiButtonProps = {
   canCall: boolean
+  disabled: boolean
   onCall: () => void
 }
 
-function GanjiButton({ canCall, onCall }: GanjiButtonProps) {
+function GanjiButton({ canCall, disabled, onCall }: GanjiButtonProps) {
   return (
     <button
       className="ganji-button"
       type="button"
-      disabled={!canCall}
+      disabled={disabled || !canCall}
       onClick={onCall}
     >
       {canCall ? 'Call GANJI' : 'GANJI unavailable'}
@@ -1778,12 +1634,14 @@ function Scoreboard({ state }: ScoreboardProps) {
 type RoundResultProps = {
   state: GameState
   cardArtworkStyle: CardArtworkStyle
+  actionsDisabled: boolean
   onNextRound: () => void
 }
 
 function RoundResult({
   state,
   cardArtworkStyle,
+  actionsDisabled,
   onNextRound,
 }: RoundResultProps) {
   const summary = state.roundSummary
@@ -1809,7 +1667,12 @@ function RoundResult({
 
       <ScoreTable state={state} cardArtworkStyle={cardArtworkStyle} />
 
-      <button className="primary-button" type="button" onClick={onNextRound}>
+      <button
+        className="primary-button"
+        type="button"
+        disabled={actionsDisabled}
+        onClick={onNextRound}
+      >
         Start next round
       </button>
     </div>
@@ -2007,26 +1870,6 @@ function ScoreTable({ state, cardArtworkStyle }: ScoreTableProps) {
   )
 }
 
-function RulesPanel() {
-  return (
-    <aside className="panel rules-panel">
-      <div className="section-heading">
-        <p className="eyebrow">Rules included</p>
-        <h2>How this version plays</h2>
-      </div>
-      <ul>
-        <li>Uses one 52-card deck, with 4 cards dealt to each player.</li>
-        <li>Black kings are worth 0. Aces are 1, jacks 11, queens 12, kings 13.</li>
-        <li>Each turn discards first, then draws one card.</li>
-        <li>Only the last card discarded by the previous player can be drawn.</li>
-        <li>Ganji can be called only as the first action of your turn.</li>
-        <li>Your hand value must be 5 or less to call Ganji.</li>
-        <li>The game ends when any player reaches the selected point limit.</li>
-      </ul>
-    </aside>
-  )
-}
-
 type CardButtonProps = {
   card: Card
   cardArtworkStyle: CardArtworkStyle
@@ -2125,83 +1968,20 @@ function isFaceCard(card: Card): boolean {
   return card.rank === 'J' || card.rank === 'Q' || card.rank === 'K'
 }
 
-function createDefaultPlayers(): SetupPlayerConfig[] {
-  return Array.from({ length: MAX_PLAYERS }, (_, index) => ({
-    name: index === 0 ? 'Player 1' : `Player ${index + 1}`,
-    isBot: index > 0,
-  }))
-}
-
 function getWebSocketUrl(): string {
   const configuredUrl = import.meta.env.VITE_WS_URL as string | undefined
-  if (configuredUrl) {
-    return configuredUrl
-  }
-
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-
-  if (import.meta.env.DEV) {
-    return `${protocol}//${window.location.hostname}:3001/ws`
-  }
-
-  return `${protocol}//${window.location.host}/ws`
-}
-
-function loadOnlinePlayerName(): string {
-  try {
-    return localStorage.getItem(ONLINE_NAME_STORAGE_KEY) ?? 'Player'
-  } catch {
-    return 'Player'
-  }
-}
-
-function loadSavedOnlineSession(): SavedOnlineSession | null {
-  try {
-    const savedSession = localStorage.getItem(ONLINE_SESSION_STORAGE_KEY)
-    if (!savedSession) {
-      return null
-    }
-
-    const parsedSession = JSON.parse(savedSession) as SavedOnlineSession
-    return parsedSession.roomCode && parsedSession.sessionId ? parsedSession : null
-  } catch {
-    localStorage.removeItem(ONLINE_SESSION_STORAGE_KEY)
-    return null
-  }
-}
-
-function saveOnlineSession(session: SavedOnlineSession) {
-  try {
-    localStorage.setItem(ONLINE_SESSION_STORAGE_KEY, JSON.stringify(session))
-  } catch {
-    // Reconnect support is useful, but the game can continue without it.
-  }
+  return resolveWebSocketUrl({
+    configuredUrl,
+    protocol: window.location.protocol,
+    hostname: window.location.hostname,
+    host: window.location.host,
+    dev: import.meta.env.DEV,
+  })
 }
 
 function formatTimerSeconds(seconds: number): string {
   const option = TURN_TIMER_OPTIONS.find((item) => item.seconds === seconds)
   return option?.label ?? `${seconds}s`
-}
-
-function loadSavedGame(): GameState {
-  try {
-    const savedGame = localStorage.getItem(STORAGE_KEY)
-    if (!savedGame) {
-      return initialGameState
-    }
-
-    const parsedGame = JSON.parse(savedGame) as GameState
-    if (Array.isArray(parsedGame.players) && parsedGame.players.length >= MIN_PLAYERS) {
-      return {
-        ...parsedGame,
-        gameOverScore: parsedGame.gameOverScore ?? 100,
-      }
-    }
-  } catch {
-    localStorage.removeItem(STORAGE_KEY)
-  }
-
-  return initialGameState
 }
 
 export default App
