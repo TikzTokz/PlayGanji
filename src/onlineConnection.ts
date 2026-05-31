@@ -25,6 +25,10 @@ type WebSocketUrlOptions = {
   dev: boolean
 }
 
+type FetchLike = (url: string, init: RequestInit) => Promise<Response>
+
+export type ReconnectCheckResult = 'valid' | 'invalid' | 'unknown'
+
 export function getReconnectDelayMs(attempt: number): number {
   const index = Math.max(0, Math.min(attempt, RECONNECT_DELAYS_MS.length - 1))
   return RECONNECT_DELAYS_MS[index]
@@ -47,6 +51,55 @@ export function resolveWebSocketUrl({
 
   const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:'
   return dev ? `${wsProtocol}//${hostname}:3001/ws` : `${wsProtocol}//${host}/ws`
+}
+
+export function resolveReconnectCheckUrl({
+  configuredUrl,
+  protocol,
+  hostname,
+  host,
+  dev,
+}: WebSocketUrlOptions): string {
+  if (configuredUrl) {
+    try {
+      const url = new URL(configuredUrl)
+      url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:'
+      url.pathname = '/api/reconnect-check'
+      url.search = ''
+      url.hash = ''
+      return url.toString()
+    } catch {
+      return configuredUrl
+    }
+  }
+
+  const httpProtocol = protocol === 'https:' ? 'https:' : 'http:'
+  return dev
+    ? `${httpProtocol}//${hostname}:3001/api/reconnect-check`
+    : `${httpProtocol}//${host}/api/reconnect-check`
+}
+
+export async function checkSavedOnlineSession(
+  fetcher: FetchLike,
+  checkUrl: string,
+  session: SavedOnlineSession,
+): Promise<ReconnectCheckResult> {
+  try {
+    const response = await fetcher(checkUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(session),
+    })
+
+    if (!response.ok) {
+      return 'unknown'
+    }
+
+    const result = (await response.json()) as { canReconnect?: boolean }
+    return result.canReconnect ? 'valid' : 'invalid'
+  } catch {
+    return 'unknown'
+  }
 }
 
 export function loadOnlinePlayerName(storage: StorageLike): string {

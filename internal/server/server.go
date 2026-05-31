@@ -90,6 +90,15 @@ type serverMessage struct {
 	RoomCode  string    `json:"roomCode,omitempty"`
 }
 
+type reconnectCheckRequest struct {
+	RoomCode  string `json:"roomCode"`
+	SessionID string `json:"sessionId"`
+}
+
+type reconnectCheckResponse struct {
+	CanReconnect bool `json:"canReconnect"`
+}
+
 type OnlineLobbyPlayer struct {
 	ID               string `json:"id"`
 	Name             string `json:"name"`
@@ -125,6 +134,7 @@ func New(distDir string) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/api/reconnect-check", s.handleReconnectCheck)
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/", s.handleStatic)
 	return mux
@@ -141,6 +151,35 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("content-type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "rooms": roomCount})
+}
+
+func (s *Server) handleReconnectCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request reconnectCheckRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Invalid request body.", http.StatusBadRequest)
+		return
+	}
+
+	canReconnect := false
+	room := s.getRoom(strings.ToUpper(strings.TrimSpace(request.RoomCode)))
+	if room != nil {
+		room.mu.Lock()
+		for _, player := range room.Players {
+			if player.SessionID != "" && player.SessionID == request.SessionID {
+				canReconnect = true
+				break
+			}
+		}
+		room.mu.Unlock()
+	}
+
+	w.Header().Set("content-type", "application/json")
+	_ = json.NewEncoder(w).Encode(reconnectCheckResponse{CanReconnect: canReconnect})
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {

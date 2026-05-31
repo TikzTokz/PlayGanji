@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest'
 import {
   ONLINE_NAME_STORAGE_KEY,
   ONLINE_SESSION_STORAGE_KEY,
+  checkSavedOnlineSession,
   forgetOnlineSession,
   getReconnectDelayMs,
   isInvalidReconnectMessage,
   loadOnlinePlayerName,
   loadSavedOnlineSession,
+  resolveReconnectCheckUrl,
   resolveWebSocketUrl,
   saveOnlinePlayerName,
   saveOnlineSession,
@@ -57,6 +59,36 @@ describe('online connection helpers', () => {
     ).toBe('wss://play.test/ws')
   })
 
+  it('resolves reconnect-check URLs alongside websocket URLs', () => {
+    expect(
+      resolveReconnectCheckUrl({
+        configuredUrl: 'wss://example.test/ws',
+        protocol: 'https:',
+        hostname: 'play.test',
+        host: 'play.test',
+        dev: false,
+      }),
+    ).toBe('https://example.test/api/reconnect-check')
+
+    expect(
+      resolveReconnectCheckUrl({
+        protocol: 'http:',
+        hostname: 'localhost',
+        host: 'localhost:5173',
+        dev: true,
+      }),
+    ).toBe('http://localhost:3001/api/reconnect-check')
+
+    expect(
+      resolveReconnectCheckUrl({
+        protocol: 'https:',
+        hostname: 'play.test',
+        host: 'play.test',
+        dev: false,
+      }),
+    ).toBe('https://play.test/api/reconnect-check')
+  })
+
   it('saves and loads the player name', () => {
     const storage = createStorage()
 
@@ -102,5 +134,22 @@ describe('online connection helpers', () => {
     expect(isInvalidReconnectMessage('Room not found.')).toBe(true)
     expect(isInvalidReconnectMessage('Saved session was not found for this room.')).toBe(true)
     expect(isInvalidReconnectMessage('Could not connect to the Ganji server.')).toBe(false)
+  })
+
+  it('checks saved reconnect sessions with the server', async () => {
+    const session = { roomCode: 'ABC123', sessionId: 'session-1' }
+    const validFetch = async () =>
+      new Response(JSON.stringify({ canReconnect: true }), { status: 200 })
+    const invalidFetch = async () =>
+      new Response(JSON.stringify({ canReconnect: false }), { status: 200 })
+    const failedFetch = async () => new Response('error', { status: 500 })
+    const throwingFetch = async () => {
+      throw new Error('network failed')
+    }
+
+    expect(await checkSavedOnlineSession(validFetch, '/api/reconnect-check', session)).toBe('valid')
+    expect(await checkSavedOnlineSession(invalidFetch, '/api/reconnect-check', session)).toBe('invalid')
+    expect(await checkSavedOnlineSession(failedFetch, '/api/reconnect-check', session)).toBe('unknown')
+    expect(await checkSavedOnlineSession(throwingFetch, '/api/reconnect-check', session)).toBe('unknown')
   })
 })

@@ -17,11 +17,13 @@ import {
   type Player,
 } from './game'
 import {
+  checkSavedOnlineSession,
   forgetOnlineSession as forgetStoredOnlineSession,
   getReconnectDelayMs,
   isInvalidReconnectMessage,
   loadOnlinePlayerName,
   loadSavedOnlineSession,
+  resolveReconnectCheckUrl,
   resolveWebSocketUrl,
   saveOnlinePlayerName,
   saveOnlineSession,
@@ -231,11 +233,15 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   const [gameOverScore, setGameOverScore] = useState(100)
   const [joinRoomCode, setJoinRoomCode] = useState('')
   const [room, setRoom] = useState<OnlineRoomView | null>(null)
-  const [serverMessage, setServerMessage] = useState(
-    'Create an online room or join one with a code.',
+  const [storedSessionToCheck] = useState(() => loadSavedOnlineSession(localStorage))
+  const [serverMessage, setServerMessage] = useState(() =>
+    storedSessionToCheck
+      ? `Checking saved room ${storedSessionToCheck.roomCode}...`
+      : 'Create an online room or join one with a code.',
   )
-  const [savedSession, setSavedSession] = useState<SavedOnlineSession | null>(
-    () => loadSavedOnlineSession(localStorage),
+  const [savedSession, setSavedSession] = useState<SavedOnlineSession | null>(null)
+  const [checkingSavedSession, setCheckingSavedSession] = useState(() =>
+    Boolean(storedSessionToCheck),
   )
   const [selection, setSelection] = useState<SelectionState>({
     turnKey: '',
@@ -272,6 +278,44 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   useEffect(() => {
     saveOnlinePlayerName(localStorage, playerName)
   }, [playerName])
+
+  useEffect(() => {
+    if (!storedSessionToCheck) {
+      return
+    }
+
+    let cancelled = false
+
+    checkSavedOnlineSession(fetch, getReconnectCheckUrl(), storedSessionToCheck).then((result) => {
+      if (cancelled || roomRef.current || socketRef.current) {
+        return
+      }
+
+      setCheckingSavedSession(false)
+
+      if (result === 'valid') {
+        savedSessionRef.current = storedSessionToCheck
+        setSavedSession(storedSessionToCheck)
+        setServerMessage(`Saved room ${storedSessionToCheck.roomCode} is available.`)
+        return
+      }
+
+      if (result === 'invalid') {
+        forgetStoredOnlineSession(localStorage)
+        savedSessionRef.current = null
+        setSavedSession(null)
+        setServerMessage('Your saved room is no longer available. Create or join a room.')
+        return
+      }
+
+      setSavedSession(null)
+      setServerMessage('Could not verify your saved room. Create or join a room to play.')
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [storedSessionToCheck])
 
   useEffect(() => {
     return () => {
@@ -655,7 +699,16 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
           </div>
         </div>
 
-        {savedSession && (
+        {checkingSavedSession && (
+          <div className="reconnect-card">
+            <div>
+              <strong>Checking saved room</strong>
+              <span>Verifying that your previous room still exists.</span>
+            </div>
+          </div>
+        )}
+
+        {!checkingSavedSession && savedSession && (
           <div className="reconnect-card">
             <div>
               <strong>Saved room {savedSession.roomCode}</strong>
@@ -1971,6 +2024,17 @@ function isFaceCard(card: Card): boolean {
 function getWebSocketUrl(): string {
   const configuredUrl = import.meta.env.VITE_WS_URL as string | undefined
   return resolveWebSocketUrl({
+    configuredUrl,
+    protocol: window.location.protocol,
+    hostname: window.location.hostname,
+    host: window.location.host,
+    dev: import.meta.env.DEV,
+  })
+}
+
+function getReconnectCheckUrl(): string {
+  const configuredUrl = import.meta.env.VITE_WS_URL as string | undefined
+  return resolveReconnectCheckUrl({
     configuredUrl,
     protocol: window.location.protocol,
     hostname: window.location.hostname,

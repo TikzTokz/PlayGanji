@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -95,6 +96,33 @@ func TestInvalidRejoinReturnsError(t *testing.T) {
 	}
 }
 
+func TestReconnectCheckValidatesSavedSession(t *testing.T) {
+	ganjiServer := New("dist")
+	testServer := httptest.NewServer(ganjiServer.Handler())
+	defer testServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(testServer.URL, "http") + "/ws"
+
+	host := dialWS(t, wsURL)
+	defer host.Close()
+	sendWS(t, host, map[string]any{"type": "CREATE_ROOM", "name": "Host", "turnTimerSeconds": 60, "gameOverScore": 100})
+	hostUpdate := readUntil(t, host, "ROOM_UPDATE")
+
+	valid := postReconnectCheck(t, testServer.URL, hostUpdate.Room.RoomCode, hostUpdate.SessionID)
+	if !valid.CanReconnect {
+		t.Fatal("expected valid saved session to reconnect")
+	}
+
+	invalidSession := postReconnectCheck(t, testServer.URL, hostUpdate.Room.RoomCode, "missing-session")
+	if invalidSession.CanReconnect {
+		t.Fatal("expected invalid session to be rejected")
+	}
+
+	missingRoom := postReconnectCheck(t, testServer.URL, "ABC123", hostUpdate.SessionID)
+	if missingRoom.CanReconnect {
+		t.Fatal("expected missing room to be rejected")
+	}
+}
+
 func TestHostOnlyActionsAreRejectedForGuests(t *testing.T) {
 	_, _, guest, cleanup := createHostGuestRoom(t)
 	defer cleanup()
@@ -181,6 +209,30 @@ func sendWS(t *testing.T, conn *websocket.Conn, message any) {
 	if err := conn.WriteJSON(message); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func postReconnectCheck(t *testing.T, serverURL string, roomCode string, sessionID string) reconnectCheckResponse {
+	t.Helper()
+	body, err := json.Marshal(reconnectCheckRequest{RoomCode: roomCode, SessionID: sessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := http.Post(serverURL+"/api/reconnect-check", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+
+	var checkResponse reconnectCheckResponse
+	if err := json.NewDecoder(response.Body).Decode(&checkResponse); err != nil {
+		t.Fatal(err)
+	}
+	return checkResponse
 }
 
 func readUntil(t *testing.T, conn *websocket.Conn, messageType string) serverMessage {
