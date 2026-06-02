@@ -1,4 +1,4 @@
-FROM docker.io/oven/bun:1.3.3@sha256:fbf8e67e9d3b806c86be7a2f2e9bae801f2d9212a21db4dcf8cc9889f5a3c9c4 AS frontend-deps
+FROM docker.io/oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS frontend-deps
 WORKDIR /app
 
 COPY package.json bun.lock ./
