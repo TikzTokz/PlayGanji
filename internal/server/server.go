@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +20,15 @@ import (
 	"playganji/internal/game"
 )
 
-const inactiveRoomTimeout = 15 * time.Minute
+const (
+	inactiveRoomTimeout    = 15 * time.Minute
+	maxReconnectBodyBytes  = 4 * 1024
+	maxWebSocketMessage    = 16 * 1024
+	webSocketPongWait      = 60 * time.Second
+	webSocketPingPeriod    = (webSocketPongWait * 9) / 10
+	webSocketWriteWait     = 10 * time.Second
+	maxPlayerNameRuneCount = 24
+)
 
 type Server struct {
 	mu       sync.RWMutex
@@ -66,6 +76,7 @@ type Room struct {
 	GameOverScore        int
 	TurnDeadline         *int64
 	TurnTimerKey         string
+	TurnTimerGeneration  int64
 	Message              string
 }
 
@@ -84,6 +95,7 @@ type clientMessage struct {
 
 type serverMessage struct {
 	Type      string    `json:"type"`
+	Code      string    `json:"code,omitempty"`
 	Message   string    `json:"message,omitempty"`
 	Room      *RoomView `json:"room,omitempty"`
 	SessionID string    `json:"sessionId,omitempty"`
@@ -126,9 +138,48 @@ func New(distDir string) *Server {
 		rooms:   map[string]*Room{},
 		distDir: distDir,
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(_ *http.Request) bool { return true },
+			CheckOrigin: isAllowedWebSocketOrigin,
 		},
 	}
+}
+
+func isAllowedWebSocketOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	originURL, err := url.Parse(origin)
+	if err != nil || originURL.Host == "" {
+		return false
+	}
+
+	requestHost := hostWithoutPort(r.Host)
+	originHost := hostWithoutPort(originURL.Host)
+	if strings.EqualFold(originURL.Host, r.Host) || (isLoopbackHost(requestHost) && isLoopbackHost(originHost)) {
+		return true
+	}
+
+	for _, allowedOrigin := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
+		allowedOrigin = strings.TrimRight(strings.TrimSpace(allowedOrigin), "/")
+		if allowedOrigin != "" && strings.EqualFold(allowedOrigin, strings.TrimRight(origin, "/")) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hostWithoutPort(host string) string {
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		return parsedHost
+	}
+	return strings.Trim(host, "[]")
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func (s *Server) Handler() http.Handler {
@@ -141,7 +192,15 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, s.Handler())
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return httpServer.ListenAndServe()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -160,6 +219,8 @@ func (s *Server) handleReconnectCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var request reconnectCheckRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxReconnectBodyBytes)
+	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, "Invalid request body.", http.StatusBadRequest)
 		return
@@ -232,6 +293,11 @@ func (s *Server) readPump(client *Client) {
 		s.detachClient(client)
 		client.close()
 	}()
+	client.conn.SetReadLimit(maxWebSocketMessage)
+	_ = client.conn.SetReadDeadline(time.Now().Add(webSocketPongWait))
+	client.conn.SetPongHandler(func(string) error {
+		return client.conn.SetReadDeadline(time.Now().Add(webSocketPongWait))
+	})
 
 	for {
 		_, rawMessage, err := client.conn.ReadMessage()
@@ -244,10 +310,29 @@ func (s *Server) readPump(client *Client) {
 }
 
 func (c *Client) writePump() {
-	for message := range c.send {
-		_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-			return
+	ticker := time.NewTicker(webSocketPingPeriod)
+	defer func() {
+		ticker.Stop()
+		_ = c.conn.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(webSocketWriteWait))
+			if !ok {
+				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
+			}
+		case <-ticker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(webSocketWriteWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -320,6 +405,8 @@ func (s *Server) handleClientMessage(client *Client, rawMessage []byte) {
 		s.setReady(client, message.Ready)
 	case "KICK_PLAYER":
 		s.kickPlayer(client, message.PlayerID)
+	case "LEAVE_ROOM":
+		s.leaveRoom(client)
 	case "DELETE_ROOM":
 		s.deleteRoom(client)
 	case "START_GAME":
@@ -387,7 +474,7 @@ func (s *Server) joinRoom(client *Client, roomCodeInput string, name string) {
 	roomCode := strings.ToUpper(strings.TrimSpace(roomCodeInput))
 	room := s.getRoom(roomCode)
 	if room == nil {
-		sendError(client, "Room not found.")
+		sendErrorCode(client, "ROOM_NOT_FOUND", "Room not found.")
 		return
 	}
 
@@ -425,10 +512,14 @@ func (s *Server) joinRoom(client *Client, roomCodeInput string, name string) {
 
 func (s *Server) rejoinRoom(client *Client, roomCodeInput string, sessionID string) {
 	s.detachClient(client)
+	if strings.TrimSpace(sessionID) == "" {
+		sendErrorCode(client, "SESSION_NOT_FOUND", "Saved session was not found for this room.")
+		return
+	}
 
 	room := s.getRoom(strings.ToUpper(strings.TrimSpace(roomCodeInput)))
 	if room == nil {
-		sendError(client, "Room not found.")
+		sendErrorCode(client, "ROOM_NOT_FOUND", "Room not found.")
 		return
 	}
 
@@ -437,20 +528,22 @@ func (s *Server) rejoinRoom(client *Client, roomCodeInput string, sessionID stri
 
 	playerIndex := -1
 	for index, player := range room.Players {
-		if player.SessionID == sessionID {
+		if player.SessionID != "" && player.SessionID == sessionID {
 			playerIndex = index
 			break
 		}
 	}
 	if playerIndex == -1 {
-		sendError(client, "Saved session was not found for this room.")
+		sendErrorCode(client, "SESSION_NOT_FOUND", "Saved session was not found for this room.")
 		return
 	}
 
 	player := room.Players[playerIndex]
 	room.Message = fmt.Sprintf("%s reconnected.", player.Name)
 	attachClientLocked(client, room, player.ID, sessionID)
-	startTurnTimerLocked(room)
+	if room.TurnDeadline == nil || room.TurnTimerKey == "" {
+		startTurnTimerLocked(room)
+	}
 	broadcastRoomLocked(room)
 	scheduleBotTurnLocked(room)
 }
@@ -610,6 +703,76 @@ func (s *Server) kickPlayer(client *Client, playerID string) {
 	broadcastRoomLocked(room)
 }
 
+func (s *Server) leaveRoom(client *Client) {
+	room := s.getClientRoom(client)
+	if room == nil {
+		client.clearData()
+		return
+	}
+
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	_, playerID, _ := client.data()
+	delete(room.Sockets, client.socketID)
+	client.clearData()
+
+	playerIndex := findServerPlayerIndexLocked(room, playerID)
+	if playerIndex == -1 {
+		updateConnectionFlagsLocked(room)
+		updateInactiveCleanupLocked(room)
+		broadcastRoomLocked(room)
+		return
+	}
+
+	player := room.Players[playerIndex]
+	if getRoomStatusLocked(room) == "lobby" {
+		wasHost := player.ID == room.HostPlayerID
+		room.Players = append(room.Players[:playerIndex], room.Players[playerIndex+1:]...)
+		updateConnectionFlagsLocked(room)
+
+		if !hasHumanPlayerLocked(room) {
+			closeRoomLocked(room, fmt.Sprintf("%s left room %s.", player.Name, room.RoomCode))
+			return
+		}
+
+		if wasHost {
+			room.HostPlayerID = ""
+			newHost := ensureActiveHostLocked(room)
+			if newHost != nil {
+				room.Message = fmt.Sprintf("%s left the room. %s is now the host.", player.Name, newHost.Name)
+			} else {
+				room.Message = fmt.Sprintf("%s left the room.", player.Name)
+			}
+		} else {
+			room.Message = fmt.Sprintf("%s left the room.", player.Name)
+		}
+
+		updateInactiveCleanupLocked(room)
+		broadcastRoomLocked(room)
+		return
+	}
+
+	updateConnectionFlagsLocked(room)
+	playerIndex = findServerPlayerIndexLocked(room, player.ID)
+	if playerIndex != -1 && !room.Players[playerIndex].Connected {
+		room.Players[playerIndex].SubstituteActive = false
+		room.Players[playerIndex].DisconnectedTimeoutUsed = false
+		room.Message = fmt.Sprintf("%s left the room.", room.Players[playerIndex].Name)
+	}
+	ensureActiveHostLocked(room)
+
+	if !hasConnectedHumanLocked(room) {
+		clearBotTimerLocked(room)
+		clearTurnTimerLocked(room)
+		room.TurnDeadline = nil
+		room.TurnTimerKey = ""
+	}
+
+	updateInactiveCleanupLocked(room)
+	broadcastRoomLocked(room)
+}
+
 func (s *Server) deleteRoom(client *Client) {
 	room := s.getClientRoom(client)
 	if room == nil {
@@ -717,10 +880,13 @@ func (s *Server) applyPlayerAction(client *Client, action game.Action) {
 		return
 	}
 
-	gameState := game.Reduce(*room.GameState, action)
+	previousGameState := *room.GameState
+	gameState := game.Reduce(previousGameState, action)
 	room.GameState = &gameState
 	room.Message = gameState.Message
-	startTurnTimerLocked(room)
+	if gameStateAdvanced(previousGameState, gameState) {
+		startTurnTimerLocked(room)
+	}
 	broadcastRoomLocked(room)
 	scheduleBotTurnLocked(room)
 }
@@ -739,11 +905,18 @@ func (s *Server) applyRoomAction(client *Client, action game.Action) {
 		sendError(client, "The game has not started.")
 		return
 	}
+	if action.Type == "START_NEXT_ROUND" && !isHostLocked(client, room) {
+		sendError(client, "Only the host can start the next round.")
+		return
+	}
 
-	gameState := game.Reduce(*room.GameState, action)
+	previousGameState := *room.GameState
+	gameState := game.Reduce(previousGameState, action)
 	room.GameState = &gameState
 	room.Message = gameState.Message
-	startTurnTimerLocked(room)
+	if gameStateAdvanced(previousGameState, gameState) {
+		startTurnTimerLocked(room)
+	}
 	broadcastRoomLocked(room)
 	scheduleBotTurnLocked(room)
 }
@@ -772,6 +945,7 @@ func (s *Server) detachClient(client *Client) {
 		room.Players[playerIndex].DisconnectedTimeoutUsed = false
 		room.Message = fmt.Sprintf("%s disconnected.", room.Players[playerIndex].Name)
 	}
+	ensureActiveHostLocked(room)
 
 	client.clearData()
 
@@ -812,6 +986,7 @@ func attachClientLocked(client *Client, room *Room, playerID string, sessionID s
 	}
 
 	updateConnectionFlagsLocked(room)
+	ensureActiveHostLocked(room)
 	updateInactiveCleanupLocked(room)
 }
 
@@ -835,7 +1010,7 @@ func processBotTurn(room *Room) {
 	defer room.mu.Unlock()
 
 	room.BotTimer = nil
-	if room.GameState == nil || room.GameState.Status != game.StatusPlaying {
+	if !hasConnectedHumanLocked(room) || room.GameState == nil || room.GameState.Status != game.StatusPlaying {
 		return
 	}
 
@@ -871,6 +1046,8 @@ func processBotTurn(room *Room) {
 
 func startTurnTimerLocked(room *Room) {
 	clearTurnTimerLocked(room)
+	room.TurnTimerGeneration++
+	turnTimerGeneration := room.TurnTimerGeneration
 
 	if !hasConnectedHumanLocked(room) || room.GameState == nil || room.GameState.Status != game.StatusPlaying {
 		room.TurnDeadline = nil
@@ -890,16 +1067,16 @@ func startTurnTimerLocked(room *Room) {
 	room.TurnTimerKey = turnTimerKey
 	room.TurnDeadline = &deadline
 	room.TurnTimer = time.AfterFunc(time.Duration(room.TurnTimerSeconds)*time.Second, func() {
-		processTurnTimeout(room, turnTimerKey)
+		processTurnTimeout(room, turnTimerKey, turnTimerGeneration)
 	})
 }
 
-func processTurnTimeout(room *Room, turnTimerKey string) {
+func processTurnTimeout(room *Room, turnTimerKey string, turnTimerGeneration int64) {
 	room.mu.Lock()
 	defer room.mu.Unlock()
 
 	room.TurnTimer = nil
-	if room.GameState == nil || room.GameState.Status != game.StatusPlaying || turnTimerKey == "" || createTurnTimerKey(*room.GameState) != turnTimerKey {
+	if room.GameState == nil || room.GameState.Status != game.StatusPlaying || turnTimerKey == "" || room.TurnTimerGeneration != turnTimerGeneration || room.TurnTimerKey != turnTimerKey || createTurnTimerKey(*room.GameState) != turnTimerKey {
 		return
 	}
 
@@ -950,6 +1127,7 @@ func createTimeoutAction(gameState game.GameState, currentPlayer game.Player) ga
 }
 
 func clearTurnTimerLocked(room *Room) {
+	room.TurnTimerGeneration++
 	if room.TurnTimer != nil {
 		room.TurnTimer.Stop()
 		room.TurnTimer = nil
@@ -1145,9 +1323,35 @@ func isServerControlledPlayerLocked(room *Room, player game.Player) bool {
 	return player.IsBot || (serverPlayer != nil && (serverPlayer.IsBot || (serverPlayer.SubstituteActive && !serverPlayer.Connected)))
 }
 
+func ensureActiveHostLocked(room *Room) *ServerPlayer {
+	currentHost := getServerPlayerLocked(room, room.HostPlayerID)
+	if currentHost != nil && !currentHost.IsBot && currentHost.Connected {
+		return currentHost
+	}
+
+	for index := range room.Players {
+		if !room.Players[index].IsBot && room.Players[index].Connected {
+			room.HostPlayerID = room.Players[index].ID
+			room.Players[index].Ready = true
+			return &room.Players[index]
+		}
+	}
+
+	return nil
+}
+
 func hasConnectedHumanLocked(room *Room) bool {
 	for _, player := range room.Players {
 		if !player.IsBot && player.Connected {
+			return true
+		}
+	}
+	return false
+}
+
+func hasHumanPlayerLocked(room *Room) bool {
+	for _, player := range room.Players {
+		if !player.IsBot {
 			return true
 		}
 	}
@@ -1172,6 +1376,60 @@ func isHostLocked(client *Client, room *Room) bool {
 
 func sendError(client *Client, message string) {
 	client.sendJSON(serverMessage{Type: "ERROR", Message: message})
+}
+
+func sendErrorCode(client *Client, code string, message string) {
+	client.sendJSON(serverMessage{Type: "ERROR", Code: code, Message: message})
+}
+
+func gameStateAdvanced(previous game.GameState, next game.GameState) bool {
+	if previous.Status != next.Status || previous.Phase != next.Phase || previous.CurrentPlayerIndex != next.CurrentPlayerIndex || previous.RoundNumber != next.RoundNumber || previous.GameOverScore != next.GameOverScore {
+		return true
+	}
+	if len(previous.Deck) != len(next.Deck) || len(previous.DiscardPile) != len(next.DiscardPile) {
+		return true
+	}
+	if !drawOffersEqual(previous.DrawOffer, next.DrawOffer) || !drawOffersEqual(previous.PendingNextOffer, next.PendingNextOffer) {
+		return true
+	}
+	if (previous.RoundSummary == nil) != (next.RoundSummary == nil) || !stringSlicesEqual(previous.WinnerIDs, next.WinnerIDs) {
+		return true
+	}
+	if len(previous.Players) != len(next.Players) {
+		return true
+	}
+	for index := range previous.Players {
+		previousPlayer := previous.Players[index]
+		nextPlayer := next.Players[index]
+		if previousPlayer.ID != nextPlayer.ID || previousPlayer.TotalScore != nextPlayer.TotalScore || len(previousPlayer.Hand) != len(nextPlayer.Hand) {
+			return true
+		}
+		for cardIndex := range previousPlayer.Hand {
+			if previousPlayer.Hand[cardIndex].ID != nextPlayer.Hand[cardIndex].ID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func drawOffersEqual(first *game.DrawOffer, second *game.DrawOffer) bool {
+	if first == nil || second == nil {
+		return first == second
+	}
+	return first.Card.ID == second.Card.ID && first.FromPlayerID == second.FromPlayerID && first.DiscardedCount == second.DiscardedCount
+}
+
+func stringSlicesEqual(first []string, second []string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) createRoomCode() string {
@@ -1219,6 +1477,10 @@ func createID() string {
 func normalizeName(name string, fallback string) string {
 	trimmedName := strings.TrimSpace(name)
 	if trimmedName != "" {
+		runes := []rune(trimmedName)
+		if len(runes) > maxPlayerNameRuneCount {
+			return string(runes[:maxPlayerNameRuneCount])
+		}
 		return trimmedName
 	}
 	return fallback

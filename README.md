@@ -7,7 +7,7 @@ The Go server owns rooms, hands, turns, scores, BOT actions, reconnects, and tim
 ## Requirements
 
 - Bun for frontend dependencies, Vite, linting, and frontend tests.
-- Go 1.23 or newer for the server.
+- Go 1.25.10 or newer for the server toolchain.
 - Docker and Docker Compose are optional for production-style deployment.
 
 ## Run Locally
@@ -115,6 +115,8 @@ go run ./cmd/server
 ```
 
 Set `PORT` to change the server port. The default is `3001`.
+
+Set `ALLOWED_ORIGINS` to a comma-separated list of browser origins when the frontend is served from a different public origin than the Go server. Same-host requests and localhost development are allowed automatically.
 
 If using Cloudflare Tunnel, it can point to the single Go service, for example:
 

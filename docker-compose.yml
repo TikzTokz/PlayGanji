@@ -8,6 +8,11 @@ services:
       - "127.0.0.1:3001:3001"
     environment:
       PORT: "3001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
       test:

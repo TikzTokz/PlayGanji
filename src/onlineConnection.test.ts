@@ -5,6 +5,7 @@ import {
   checkSavedOnlineSession,
   forgetOnlineSession,
   getReconnectDelayMs,
+  isInvalidReconnectCode,
   isInvalidReconnectMessage,
   loadOnlinePlayerName,
   loadSavedOnlineSession,
@@ -63,6 +64,16 @@ describe('online connection helpers', () => {
     expect(
       resolveReconnectCheckUrl({
         configuredUrl: 'wss://example.test/ws',
+        protocol: 'https:',
+        hostname: 'play.test',
+        host: 'play.test',
+        dev: false,
+      }),
+    ).toBe('https://example.test/api/reconnect-check')
+
+    expect(
+      resolveReconnectCheckUrl({
+        configuredUrl: 'https://example.test/ws',
         protocol: 'https:',
         hostname: 'play.test',
         host: 'play.test',
@@ -134,6 +145,9 @@ describe('online connection helpers', () => {
     expect(isInvalidReconnectMessage('Room not found.')).toBe(true)
     expect(isInvalidReconnectMessage('Saved session was not found for this room.')).toBe(true)
     expect(isInvalidReconnectMessage('Could not connect to the Ganji server.')).toBe(false)
+    expect(isInvalidReconnectCode('ROOM_NOT_FOUND')).toBe(true)
+    expect(isInvalidReconnectCode('SESSION_NOT_FOUND')).toBe(true)
+    expect(isInvalidReconnectCode('UNKNOWN')).toBe(false)
   })
 
   it('checks saved reconnect sessions with the server', async () => {

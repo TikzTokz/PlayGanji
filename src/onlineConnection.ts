@@ -38,6 +38,10 @@ export function isInvalidReconnectMessage(message: string): boolean {
   return message === 'Room not found.' || message === 'Saved session was not found for this room.'
 }
 
+export function isInvalidReconnectCode(code?: string): boolean {
+  return code === 'ROOM_NOT_FOUND' || code === 'SESSION_NOT_FOUND'
+}
+
 export function resolveWebSocketUrl({
   configuredUrl,
   protocol,
@@ -63,7 +67,11 @@ export function resolveReconnectCheckUrl({
   if (configuredUrl) {
     try {
       const url = new URL(configuredUrl)
-      url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:'
+      if (url.protocol === 'wss:') {
+        url.protocol = 'https:'
+      } else if (url.protocol === 'ws:') {
+        url.protocol = 'http:'
+      }
       url.pathname = '/api/reconnect-check'
       url.search = ''
       url.hash = ''
@@ -102,24 +110,33 @@ export async function checkSavedOnlineSession(
   }
 }
 
-export function loadOnlinePlayerName(storage: StorageLike): string {
+export function loadOnlinePlayerName(storage: StorageLike | null | undefined): string {
   try {
+    if (!storage) {
+      return 'Player'
+    }
     return storage.getItem(ONLINE_NAME_STORAGE_KEY) ?? 'Player'
   } catch {
     return 'Player'
   }
 }
 
-export function saveOnlinePlayerName(storage: StorageLike, playerName: string) {
+export function saveOnlinePlayerName(storage: StorageLike | null | undefined, playerName: string) {
   try {
+    if (!storage) {
+      return
+    }
     storage.setItem(ONLINE_NAME_STORAGE_KEY, playerName)
   } catch {
     // The typed player name is convenient, not required.
   }
 }
 
-export function loadSavedOnlineSession(storage: StorageLike): SavedOnlineSession | null {
+export function loadSavedOnlineSession(storage: StorageLike | null | undefined): SavedOnlineSession | null {
   try {
+    if (!storage) {
+      return null
+    }
     const savedSession = storage.getItem(ONLINE_SESSION_STORAGE_KEY)
     if (!savedSession) {
       return null
@@ -129,7 +146,7 @@ export function loadSavedOnlineSession(storage: StorageLike): SavedOnlineSession
     return parsedSession.roomCode && parsedSession.sessionId ? parsedSession : null
   } catch {
     try {
-      storage.removeItem(ONLINE_SESSION_STORAGE_KEY)
+      storage?.removeItem(ONLINE_SESSION_STORAGE_KEY)
     } catch {
       // Clearing invalid reconnect data is optional.
     }
@@ -137,16 +154,22 @@ export function loadSavedOnlineSession(storage: StorageLike): SavedOnlineSession
   }
 }
 
-export function saveOnlineSession(storage: StorageLike, session: SavedOnlineSession) {
+export function saveOnlineSession(storage: StorageLike | null | undefined, session: SavedOnlineSession) {
   try {
+    if (!storage) {
+      return
+    }
     storage.setItem(ONLINE_SESSION_STORAGE_KEY, JSON.stringify(session))
   } catch {
     // Reconnect support is useful, but the game can continue without it.
   }
 }
 
-export function forgetOnlineSession(storage: StorageLike) {
+export function forgetOnlineSession(storage: StorageLike | null | undefined) {
   try {
+    if (!storage) {
+      return
+    }
     storage.removeItem(ONLINE_SESSION_STORAGE_KEY)
   } catch {
     // Clearing saved reconnect data is optional.

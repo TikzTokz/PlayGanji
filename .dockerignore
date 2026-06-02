@@ -1,6 +1,13 @@
 .git
+.github
+.DS_Store
+.env
+.env.*
 dist
 node_modules
+coverage
+*.lcov
 *.log
+*.tsbuildinfo
 server
 ganji-server

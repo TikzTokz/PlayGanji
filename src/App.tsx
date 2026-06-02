@@ -20,6 +20,7 @@ import {
   checkSavedOnlineSession,
   forgetOnlineSession as forgetStoredOnlineSession,
   getReconnectDelayMs,
+  isInvalidReconnectCode,
   isInvalidReconnectMessage,
   loadOnlinePlayerName,
   loadSavedOnlineSession,
@@ -56,6 +57,7 @@ const TURN_TIMER_OPTIONS = [
   { label: '1.5 minutes', seconds: 90 },
   { label: '2 minutes', seconds: 120 },
 ]
+const MAX_PLAYER_NAME_LENGTH = 24
 const CARD_ASSET_RANKS = [
   'ace',
   '2',
@@ -88,6 +90,14 @@ type CardArtworkStyle = 'standard'
 type SelectionState = {
   turnKey: string
   cardIds: string[]
+}
+
+function getOnlineStorage(): Storage | null {
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
 }
 
 function App() {
@@ -135,7 +145,14 @@ function LoadingScreen({ loaded, total }: LoadingScreenProps) {
         <p className="eyebrow">Preparing table</p>
         <h1>Ganji</h1>
         <p>Loading cards, table art, and sounds before play starts.</p>
-        <div className="loading-meter" aria-label="Asset loading progress">
+        <div
+          className="loading-meter"
+          role="progressbar"
+          aria-label="Asset loading progress"
+          aria-valuemin={0}
+          aria-valuemax={total}
+          aria-valuenow={loaded}
+        >
           <span style={{ width: `${progress}%` }}></span>
         </div>
         <strong>
@@ -226,14 +243,15 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   const intentionalCloseRef = useRef(false)
   const roomRef = useRef<OnlineRoomView | null>(null)
   const savedSessionRef = useRef<SavedOnlineSession | null>(null)
+  const pendingConnectionTypeRef = useRef<ClientToServerMessage['type'] | null>(null)
   const [connectionStatus, setConnectionStatus] =
     useState<OnlineConnectionStatus>('idle')
-  const [playerName, setPlayerName] = useState(() => loadOnlinePlayerName(localStorage))
+  const [playerName, setPlayerName] = useState(() => loadOnlinePlayerName(getOnlineStorage()))
   const [turnTimerSeconds, setTurnTimerSeconds] = useState(60)
   const [gameOverScore, setGameOverScore] = useState(100)
   const [joinRoomCode, setJoinRoomCode] = useState('')
   const [room, setRoom] = useState<OnlineRoomView | null>(null)
-  const [storedSessionToCheck] = useState(() => loadSavedOnlineSession(localStorage))
+  const [storedSessionToCheck] = useState(() => loadSavedOnlineSession(getOnlineStorage()))
   const [serverMessage, setServerMessage] = useState(() =>
     storedSessionToCheck
       ? `Checking saved room ${storedSessionToCheck.roomCode}...`
@@ -276,7 +294,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   }, [savedSession])
 
   useEffect(() => {
-    saveOnlinePlayerName(localStorage, playerName)
+    saveOnlinePlayerName(getOnlineStorage(), playerName)
   }, [playerName])
 
   useEffect(() => {
@@ -301,15 +319,16 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
       }
 
       if (result === 'invalid') {
-        forgetStoredOnlineSession(localStorage)
+        forgetStoredOnlineSession(getOnlineStorage())
         savedSessionRef.current = null
         setSavedSession(null)
         setServerMessage('Your saved room is no longer available. Create or join a room.')
         return
       }
 
-      setSavedSession(null)
-      setServerMessage('Could not verify your saved room. Create or join a room to play.')
+      savedSessionRef.current = storedSessionToCheck
+      setSavedSession(storedSessionToCheck)
+      setServerMessage('Could not verify your saved room. You can try reconnecting or create a new room.')
     })
 
     return () => {
@@ -348,6 +367,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     }
 
     intentionalCloseRef.current = false
+    pendingConnectionTypeRef.current = message.type
     socketRef.current?.close()
     setConnectionStatus(status)
     setServerMessage(
@@ -364,8 +384,6 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
         return
       }
 
-      setConnectionStatus('connected')
-      reconnectAttemptRef.current = 0
       socket.send(JSON.stringify(message))
     })
 
@@ -447,7 +465,12 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     }
 
     if (message.type === 'ERROR') {
-      if (isInvalidReconnectMessage(message.message)) {
+      const failedConnectionType = pendingConnectionTypeRef.current
+      pendingConnectionTypeRef.current = null
+      if (
+        failedConnectionType === 'REJOIN_ROOM' &&
+        (isInvalidReconnectCode(message.code) || isInvalidReconnectMessage(message.message))
+      ) {
         clearReconnectTimer()
         roomRef.current = null
         savedSessionRef.current = null
@@ -463,6 +486,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
 
     if (message.type === 'ROOM_CLOSED') {
       clearReconnectTimer()
+      pendingConnectionTypeRef.current = null
       roomRef.current = null
       savedSessionRef.current = null
       setRoom(null)
@@ -475,6 +499,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
 
     clearReconnectTimer()
     reconnectAttemptRef.current = 0
+    pendingConnectionTypeRef.current = null
     setConnectionStatus('connected')
     roomRef.current = message.room
     setRoom(message.room)
@@ -486,7 +511,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     }
     savedSessionRef.current = session
     setSavedSession(session)
-    saveOnlineSession(localStorage, session)
+    saveOnlineSession(getOnlineStorage(), session)
   }
 
   function sendOnlineMessage(message: ClientToServerMessage) {
@@ -513,11 +538,19 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     intentionalCloseRef.current = true
     const socket = socketRef.current
     socketRef.current = null
+    pendingConnectionTypeRef.current = null
+    if (socket?.readyState === WebSocket.OPEN) {
+      const leaveMessage: ClientToServerMessage = { type: 'LEAVE_ROOM' }
+      socket.send(JSON.stringify(leaveMessage))
+    }
     socket?.close()
     roomRef.current = null
+    savedSessionRef.current = null
     setRoom(null)
+    setSavedSession(null)
     setSelection({ turnKey: '', cardIds: [] })
     setConnectionStatus('idle')
+    forgetStoredOnlineSession(getOnlineStorage())
     setServerMessage('Left the room. Create or join another room.')
   }
 
@@ -549,7 +582,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
 
   function forgetOnlineSession() {
     clearReconnectTimer()
-    forgetStoredOnlineSession(localStorage)
+    forgetStoredOnlineSession(getOnlineStorage())
     savedSessionRef.current = null
     setSavedSession(null)
   }
@@ -612,7 +645,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
           }
           onCallGanji={() => sendOnlineMessage({ type: 'CALL_GANJI' })}
           onNextRound={() => sendOnlineMessage({ type: 'START_NEXT_ROUND' })}
-          onReset={() => setRoom(null)}
+          onReset={leaveOnlineRoom}
         />
       </>
     )
@@ -626,7 +659,9 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
           <h2>Create or join a room</h2>
         </div>
 
-        <p className="message-bar online-message">{serverMessage}</p>
+        <p className="message-bar online-message" role="status" aria-live="polite">
+          {serverMessage}
+        </p>
 
         <label className="field-label" htmlFor="online-name">
           Your name
@@ -634,6 +669,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
         <input
           id="online-name"
           type="text"
+          maxLength={MAX_PLAYER_NAME_LENGTH}
           value={playerName}
           onChange={(event) => setPlayerName(event.target.value)}
         />
@@ -1088,7 +1124,9 @@ function GameScreen({
           </div>
         </div>
 
-        <p className="message-bar">{state.message}</p>
+        <p className="message-bar" role="status" aria-live="polite">
+          {state.message}
+        </p>
 
         {state.status === 'playing' && currentPlayer && (
           <>
@@ -1944,6 +1982,8 @@ function CardButton({
         isRedSuit(card.suit) ? ' red' : ' black'
       }${card.value === 0 ? ' zero-card' : ''}`}
       type="button"
+      aria-label={`${cardName(card)}${selected ? ' selected' : ''}`}
+      aria-pressed={selected}
       disabled={disabled}
       onClick={onClick}
       title={cardName(card)}

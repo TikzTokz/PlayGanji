@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"playganji/internal/game"
 )
 
 func TestHealthEndpoint(t *testing.T) {
@@ -96,6 +98,28 @@ func TestInvalidRejoinReturnsError(t *testing.T) {
 	}
 }
 
+func TestEmptySessionCannotRejoinBotSeat(t *testing.T) {
+	_, wsURL, cleanup := newTestWSServer(t)
+	defer cleanup()
+
+	host := dialWS(t, wsURL)
+	defer host.Close()
+	sendWS(t, host, map[string]any{"type": "CREATE_ROOM", "name": "Host", "turnTimerSeconds": 60, "gameOverScore": 100})
+	hostUpdate := readUntil(t, host, "ROOM_UPDATE")
+
+	sendWS(t, host, map[string]any{"type": "ADD_BOT"})
+	_ = readUntil(t, host, "ROOM_UPDATE")
+
+	client := dialWS(t, wsURL)
+	defer client.Close()
+	sendWS(t, client, map[string]any{"type": "REJOIN_ROOM", "roomCode": hostUpdate.Room.RoomCode, "sessionId": ""})
+
+	message := readUntil(t, client, "ERROR")
+	if message.Code != "SESSION_NOT_FOUND" || message.Message != "Saved session was not found for this room." {
+		t.Fatalf("message = %#v", message)
+	}
+}
+
 func TestReconnectCheckValidatesSavedSession(t *testing.T) {
 	ganjiServer := New("dist")
 	testServer := httptest.NewServer(ganjiServer.Handler())
@@ -131,6 +155,126 @@ func TestHostOnlyActionsAreRejectedForGuests(t *testing.T) {
 	message := readUntil(t, guest, "ERROR")
 	if message.Message != "Only the host can add bots." {
 		t.Fatalf("message = %q", message.Message)
+	}
+}
+
+func TestGuestCannotStartNextRound(t *testing.T) {
+	ganjiServer, wsURL, cleanup := newTestWSServer(t)
+	defer cleanup()
+
+	host := dialWS(t, wsURL)
+	defer host.Close()
+	sendWS(t, host, map[string]any{"type": "CREATE_ROOM", "name": "Host", "turnTimerSeconds": 60, "gameOverScore": 100})
+	hostUpdate := readUntil(t, host, "ROOM_UPDATE")
+
+	guest := dialWS(t, wsURL)
+	defer guest.Close()
+	sendWS(t, guest, map[string]any{"type": "JOIN_ROOM", "roomCode": hostUpdate.Room.RoomCode, "name": "Guest"})
+	_ = readUntil(t, guest, "ROOM_UPDATE")
+	sendWS(t, guest, map[string]any{"type": "SET_READY", "ready": true})
+	_ = readUntil(t, guest, "ROOM_UPDATE")
+
+	sendWS(t, host, map[string]any{"type": "ADD_BOT"})
+	_ = readUntil(t, host, "ROOM_UPDATE")
+	sendWS(t, host, map[string]any{"type": "START_GAME"})
+	_ = readUntilPlaying(t, host)
+	_ = readUntilPlaying(t, guest)
+
+	room := ganjiServer.getRoom(hostUpdate.Room.RoomCode)
+	if room == nil {
+		t.Fatal("missing room")
+	}
+	room.mu.Lock()
+	gameState := *room.GameState
+	gameState.Status = game.StatusRoundOver
+	room.GameState = &gameState
+	room.mu.Unlock()
+
+	sendWS(t, guest, map[string]any{"type": "START_NEXT_ROUND"})
+	message := readUntil(t, guest, "ERROR")
+	if message.Message != "Only the host can start the next round." {
+		t.Fatalf("message = %q", message.Message)
+	}
+}
+
+func TestInvalidTurnActionDoesNotResetTimer(t *testing.T) {
+	ganjiServer, wsURL, cleanup := newTestWSServer(t)
+	defer cleanup()
+
+	host := dialWS(t, wsURL)
+	defer host.Close()
+	sendWS(t, host, map[string]any{"type": "CREATE_ROOM", "name": "Host", "turnTimerSeconds": 60, "gameOverScore": 100})
+	hostUpdate := readUntil(t, host, "ROOM_UPDATE")
+
+	guest := dialWS(t, wsURL)
+	defer guest.Close()
+	sendWS(t, guest, map[string]any{"type": "JOIN_ROOM", "roomCode": hostUpdate.Room.RoomCode, "name": "Guest"})
+	_ = readUntil(t, guest, "ROOM_UPDATE")
+	sendWS(t, guest, map[string]any{"type": "SET_READY", "ready": true})
+	_ = readUntil(t, guest, "ROOM_UPDATE")
+
+	sendWS(t, host, map[string]any{"type": "ADD_BOT"})
+	_ = readUntil(t, host, "ROOM_UPDATE")
+	sendWS(t, host, map[string]any{"type": "START_GAME"})
+	_ = readUntilPlaying(t, host)
+
+	room := ganjiServer.getRoom(hostUpdate.Room.RoomCode)
+	if room == nil {
+		t.Fatal("missing room")
+	}
+	room.mu.Lock()
+	if room.TurnDeadline == nil {
+		t.Fatal("missing turn deadline")
+	}
+	deadline := *room.TurnDeadline
+	room.mu.Unlock()
+
+	sendWS(t, host, map[string]any{"type": "DISCARD_CARDS", "cardIds": []string{}})
+	update := readUntil(t, host, "ROOM_UPDATE")
+	if update.Room.TurnDeadline == nil || *update.Room.TurnDeadline != deadline {
+		t.Fatalf("deadline changed after invalid action: got %v, want %d", update.Room.TurnDeadline, deadline)
+	}
+}
+
+func TestHostLeaveTransfersLobbyHost(t *testing.T) {
+	host, _, guest, cleanup := createHostGuestRoom(t)
+	defer cleanup()
+
+	sendWS(t, host, map[string]any{"type": "LEAVE_ROOM"})
+	update := readUntil(t, guest, "ROOM_UPDATE")
+	if update.Room.HostPlayerID != "player-2" {
+		t.Fatalf("host = %q, want player-2", update.Room.HostPlayerID)
+	}
+	if len(update.Room.Players) != 1 || update.Room.Players[0].ID != "player-2" {
+		t.Fatalf("players = %#v", update.Room.Players)
+	}
+}
+
+func TestReconnectCheckRejectsOversizedBody(t *testing.T) {
+	ganjiServer := New("dist")
+	testServer := httptest.NewServer(ganjiServer.Handler())
+	defer testServer.Close()
+
+	response, err := http.Post(testServer.URL+"/api/reconnect-check", "application/json", bytes.NewReader(make([]byte, maxReconnectBodyBytes+1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.StatusCode)
+	}
+}
+
+func TestWebSocketRejectsUnexpectedOrigin(t *testing.T) {
+	_, wsURL, cleanup := newTestWSServer(t)
+	defer cleanup()
+
+	header := http.Header{"Origin": []string{"https://evil.example"}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err == nil {
+		conn.Close()
+		t.Fatal("expected websocket dial to fail for unexpected origin")
 	}
 }
 

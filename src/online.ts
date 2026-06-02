@@ -30,6 +30,7 @@ export type ClientToServerMessage =
   | { type: 'REMOVE_BOT'; playerId: string }
   | { type: 'SET_READY'; ready: boolean }
   | { type: 'KICK_PLAYER'; playerId: string }
+  | { type: 'LEAVE_ROOM' }
   | { type: 'DELETE_ROOM' }
   | { type: 'START_GAME' }
   | { type: 'DISCARD_CARDS'; cardIds: string[] }
@@ -41,4 +42,4 @@ export type ClientToServerMessage =
 export type ServerToClientMessage =
   | { type: 'ROOM_UPDATE'; room: OnlineRoomView; sessionId: string }
   | { type: 'ROOM_CLOSED'; roomCode: string; message: string }
-  | { type: 'ERROR'; message: string }
+  | { type: 'ERROR'; code?: string; message: string }
