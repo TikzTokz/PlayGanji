@@ -67,28 +67,40 @@ jobs:
     steps:
       - name: Deploy with Docker Compose
         working-directory: /opt/PlayGanji
+        env:
+          XDG_RUNTIME_DIR: /run/user/1002
+          DBUS_SESSION_BUS_ADDRESS: unix:path=/run/user/1002/bus
         run: |
           git fetch origin main
           git reset --hard origin/main
           git clean -ffdx
           docker image inspect playganji:latest > /dev/null 2>&1 && docker tag playganji:latest playganji:previous || true
-          docker compose up -d --build
+          docker compose up -d --build --force-recreate
           docker compose ps
 
       - name: Health check
+        env:
+          PUBLIC_HEALTH_URL: ${{ vars.PUBLIC_HEALTH_URL || 'https://kingbruno.playganji.online/health' }}
+          XDG_RUNTIME_DIR: /run/user/1002
+          DBUS_SESSION_BUS_ADDRESS: unix:path=/run/user/1002/bus
         run: |
           for attempt in {1..10}; do
-            if curl --fail --silent http://127.0.0.1:3001/health > /dev/null; then
-              exit 0
+            if curl --fail --silent --show-error http://127.0.0.1:3001/health > /dev/null; then
+              break
+            fi
+
+            if [ "$attempt" = "10" ]; then
+              cd /opt/PlayGanji
+              if docker image inspect playganji:previous > /dev/null 2>&1; then
+                docker tag playganji:previous playganji:latest
+                docker compose up -d --force-recreate
+              fi
+
+              curl --fail --show-error http://127.0.0.1:3001/health
             fi
 
             sleep 3
           done
 
-          cd /opt/PlayGanji
-          if docker image inspect playganji:previous > /dev/null 2>&1; then
-            docker tag playganji:previous playganji:latest
-            docker compose up -d
-          fi
-
-          curl --fail http://127.0.0.1:3001/health
+          curl --fail --silent --show-error 'http://[::1]:3001/health' > /dev/null
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 --retry-all-errors "$PUBLIC_HEALTH_URL" > /dev/null

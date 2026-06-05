@@ -140,7 +140,7 @@ Then open:
 http://localhost:3001
 ```
 
-`docker-compose.yml` binds the app to `127.0.0.1:3001` by default.
+`docker-compose.yml` publishes the app to IPv4 and IPv6 loopback on port `3001` for the Cloudflare tunnel.
 
 Stop the container with:
 
@@ -161,7 +161,7 @@ CI steps:
 - Build the frontend.
 - Build the Go server.
 
-Deploy runs on the self-hosted runner from `/opt/PlayGanji` with Docker Compose and checks `/health` on `127.0.0.1:3001`.
+Deploy runs on the self-hosted runner from `/opt/PlayGanji` with Docker Compose and checks both local `/health` and the public health URL.
 
 ## Implemented Rules
 
