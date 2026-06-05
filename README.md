@@ -7,7 +7,7 @@ The Go server owns rooms, hands, turns, scores, BOT actions, reconnects, and tim
 ## Requirements
 
 - Bun for frontend dependencies, Vite, linting, and frontend tests.
-- Go 1.25.10 or newer for the server toolchain.
+- Go 1.25.11 or newer for the server toolchain.
 - Docker and Docker Compose are optional for production-style deployment.
 
 ## Run Locally
