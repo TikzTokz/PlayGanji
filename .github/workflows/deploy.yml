@@ -75,6 +75,7 @@ jobs:
           git reset --hard origin/main
           git clean -ffdx
           docker image inspect playganji:latest > /dev/null 2>&1 && docker tag playganji:latest playganji:previous || true
+          systemctl --user disable --now playganji.service || true
           docker compose up -d --build --force-recreate
           docker compose ps
 

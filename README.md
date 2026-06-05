@@ -140,7 +140,7 @@ Then open:
 http://localhost:3001
 ```
 
-`docker-compose.yml` publishes the app to IPv4 and IPv6 loopback on port `3001` for the Cloudflare tunnel.
+`docker-compose.yml` uses host networking and binds the app to IPv4 and IPv6 loopback on port `3001` for the Cloudflare tunnel.
 
 Stop the container with:
 
