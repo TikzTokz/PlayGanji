@@ -28,6 +28,8 @@ const (
 	webSocketPingPeriod    = (webSocketPongWait * 9) / 10
 	webSocketWriteWait     = 10 * time.Second
 	maxPlayerNameRuneCount = 24
+	maxChatMessages        = 100
+	maxChatMessageRunes    = 500
 )
 
 type Server struct {
@@ -65,6 +67,8 @@ type Room struct {
 	RoomCode             string
 	HostPlayerID         string
 	Players              []ServerPlayer
+	ChatMessages         []OnlineChatMessage
+	VoicePlayerIDs       map[string]bool
 	GameState            *game.GameState
 	Sockets              map[string]*Client
 	NextPlayerNumber     int
@@ -91,6 +95,9 @@ type clientMessage struct {
 	Ready            bool            `json:"ready"`
 	CardIDs          []string        `json:"cardIds"`
 	Source           game.DrawSource `json:"source"`
+	Text             string          `json:"text"`
+	TargetPlayerID   string          `json:"targetPlayerId"`
+	Signal           json.RawMessage `json:"signal"`
 }
 
 type serverMessage struct {
@@ -100,6 +107,7 @@ type serverMessage struct {
 	Room      *RoomView `json:"room,omitempty"`
 	SessionID string    `json:"sessionId,omitempty"`
 	RoomCode  string    `json:"roomCode,omitempty"`
+	PlayerID  string    `json:"playerId,omitempty"`
 }
 
 type reconnectCheckRequest struct {
@@ -120,6 +128,14 @@ type OnlineLobbyPlayer struct {
 	SubstituteActive bool   `json:"substituteActive"`
 }
 
+type OnlineChatMessage struct {
+	ID         string `json:"id"`
+	PlayerID   string `json:"playerId"`
+	PlayerName string `json:"playerName"`
+	Text       string `json:"text"`
+	SentAt     int64  `json:"sentAt"`
+}
+
 type RoomView struct {
 	RoomCode         string              `json:"roomCode"`
 	Status           string              `json:"status"`
@@ -130,6 +146,8 @@ type RoomView struct {
 	TurnTimerSeconds int                 `json:"turnTimerSeconds"`
 	GameOverScore    int                 `json:"gameOverScore"`
 	TurnDeadline     *int64              `json:"turnDeadline"`
+	ChatMessages     []OnlineChatMessage `json:"chatMessages"`
+	VoicePlayerIDs   []string            `json:"voicePlayerIds"`
 	Message          string              `json:"message"`
 }
 
@@ -421,6 +439,14 @@ func (s *Server) handleClientMessage(client *Client, rawMessage []byte) {
 		s.applyPlayerAction(client, game.Action{Type: "END_TURN"})
 	case "START_NEXT_ROUND":
 		s.applyRoomAction(client, game.Action{Type: "START_NEXT_ROUND"})
+	case "SEND_CHAT_MESSAGE":
+		s.sendChatMessage(client, message.Text)
+	case "VOICE_JOIN":
+		s.joinVoice(client)
+	case "VOICE_LEAVE":
+		s.leaveVoice(client)
+	case "VOICE_SIGNAL":
+		s.relayVoiceSignal(client, message.TargetPlayerID, message.Signal)
 	}
 }
 
@@ -444,6 +470,8 @@ func (s *Server) createRoom(client *Client, name string, turnTimerSeconds int, g
 		RoomCode:             roomCode,
 		HostPlayerID:         player.ID,
 		Players:              []ServerPlayer{player},
+		ChatMessages:         []OnlineChatMessage{},
+		VoicePlayerIDs:       map[string]bool{},
 		GameState:            nil,
 		Sockets:              map[string]*Client{},
 		NextPlayerNumber:     2,
@@ -687,6 +715,7 @@ func (s *Server) kickPlayer(client *Client, playerID string) {
 		return
 	}
 	player := room.Players[playerIndex]
+	removeVoicePlayerLocked(room, player.ID)
 
 	for socketID, playerClient := range room.Sockets {
 		_, socketPlayerID, _ := playerClient.data()
@@ -715,6 +744,7 @@ func (s *Server) leaveRoom(client *Client) {
 
 	_, playerID, _ := client.data()
 	delete(room.Sockets, client.socketID)
+	removeVoicePlayerLocked(room, playerID)
 	client.clearData()
 
 	playerIndex := findServerPlayerIndexLocked(room, playerID)
@@ -921,6 +951,111 @@ func (s *Server) applyRoomAction(client *Client, action game.Action) {
 	scheduleBotTurnLocked(room)
 }
 
+func (s *Server) sendChatMessage(client *Client, text string) {
+	room := s.getClientRoom(client)
+	if room == nil {
+		sendError(client, "Join a room before sending chat messages.")
+		return
+	}
+
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	_, playerID, _ := client.data()
+	player := getServerPlayerLocked(room, playerID)
+	if player == nil || player.IsBot {
+		sendError(client, "Only room players can send chat messages.")
+		return
+	}
+
+	trimmedText := truncateRunes(strings.TrimSpace(text), maxChatMessageRunes)
+	if trimmedText == "" {
+		sendError(client, "Chat message cannot be empty.")
+		return
+	}
+
+	chatMessage := OnlineChatMessage{
+		ID:         createID(),
+		PlayerID:   player.ID,
+		PlayerName: player.Name,
+		Text:       trimmedText,
+		SentAt:     time.Now().UnixMilli(),
+	}
+
+	room.ChatMessages = append(room.ChatMessages, chatMessage)
+	if len(room.ChatMessages) > maxChatMessages {
+		room.ChatMessages = room.ChatMessages[len(room.ChatMessages)-maxChatMessages:]
+	}
+
+	broadcastToRoomLocked(room, struct {
+		Type    string            `json:"type"`
+		Message OnlineChatMessage `json:"message"`
+	}{Type: "CHAT_MESSAGE", Message: chatMessage})
+}
+
+func (s *Server) joinVoice(client *Client) {
+	room := s.getClientRoom(client)
+	if room == nil {
+		sendError(client, "Join a room before joining voice chat.")
+		return
+	}
+
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	_, playerID, _ := client.data()
+	player := getServerPlayerLocked(room, playerID)
+	if player == nil || player.IsBot {
+		sendError(client, "Only human room players can join voice chat.")
+		return
+	}
+
+	if !room.VoicePlayerIDs[player.ID] {
+		room.VoicePlayerIDs[player.ID] = true
+		broadcastToRoomLocked(room, serverMessage{Type: "VOICE_PEER_JOINED", PlayerID: player.ID})
+	}
+
+	broadcastRoomLocked(room)
+}
+
+func (s *Server) leaveVoice(client *Client) {
+	room := s.getClientRoom(client)
+	if room == nil {
+		return
+	}
+
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	_, playerID, _ := client.data()
+	if removeVoicePlayerLocked(room, playerID) {
+		broadcastRoomLocked(room)
+	}
+}
+
+func (s *Server) relayVoiceSignal(client *Client, targetPlayerID string, signal json.RawMessage) {
+	room := s.getClientRoom(client)
+	if room == nil {
+		sendError(client, "Join a room before using voice chat.")
+		return
+	}
+
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	_, fromPlayerID, _ := client.data()
+	if fromPlayerID == "" || getServerPlayerLocked(room, targetPlayerID) == nil || len(signal) == 0 {
+		sendError(client, "Voice peer was not found in this room.")
+		return
+	}
+
+	sendToPlayerLocked(room, targetPlayerID, struct {
+		Type         string          `json:"type"`
+		FromPlayerID string          `json:"fromPlayerId"`
+		Signal       json.RawMessage `json:"signal"`
+	}{Type: "VOICE_SIGNAL", FromPlayerID: fromPlayerID, Signal: signal})
+}
+
 func (s *Server) detachClient(client *Client) {
 	roomCode, playerID, _ := client.data()
 	if roomCode == "" {
@@ -937,6 +1072,7 @@ func (s *Server) detachClient(client *Client) {
 	defer room.mu.Unlock()
 
 	delete(room.Sockets, client.socketID)
+	removeVoicePlayerLocked(room, playerID)
 	updateConnectionFlagsLocked(room)
 
 	playerIndex := findServerPlayerIndexLocked(room, playerID)
@@ -1202,6 +1338,53 @@ func broadcastRoomLocked(room *Room) {
 	}
 }
 
+func broadcastToRoomLocked(room *Room, message any) {
+	for _, client := range room.Sockets {
+		client.sendJSON(message)
+	}
+}
+
+func sendToPlayerLocked(room *Room, playerID string, message any) {
+	for _, client := range room.Sockets {
+		_, socketPlayerID, _ := client.data()
+		if socketPlayerID == playerID {
+			client.sendJSON(message)
+		}
+	}
+}
+
+func removeVoicePlayerLocked(room *Room, playerID string) bool {
+	if playerID == "" || !room.VoicePlayerIDs[playerID] {
+		return false
+	}
+
+	delete(room.VoicePlayerIDs, playerID)
+	broadcastToRoomLocked(room, serverMessage{Type: "VOICE_PEER_LEFT", PlayerID: playerID})
+	return true
+}
+
+func voicePlayerIDsLocked(room *Room) []string {
+	voicePlayerIDs := make([]string, 0, len(room.VoicePlayerIDs))
+	for _, player := range room.Players {
+		if room.VoicePlayerIDs[player.ID] {
+			voicePlayerIDs = append(voicePlayerIDs, player.ID)
+		}
+	}
+	return voicePlayerIDs
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
 func sendRoomUpdateLocked(client *Client, room *Room) {
 	_, playerID, sessionID := client.data()
 	if playerID == "" || sessionID == "" {
@@ -1233,6 +1416,7 @@ func createRoomViewLocked(room *Room, viewerPlayerID string) *RoomView {
 		redacted := redactGameState(*room.GameState, viewerPlayerID)
 		gameState = &redacted
 	}
+	chatMessages := append([]OnlineChatMessage{}, room.ChatMessages...)
 
 	return &RoomView{
 		RoomCode:         room.RoomCode,
@@ -1244,6 +1428,8 @@ func createRoomViewLocked(room *Room, viewerPlayerID string) *RoomView {
 		TurnTimerSeconds: room.TurnTimerSeconds,
 		GameOverScore:    room.GameOverScore,
 		TurnDeadline:     room.TurnDeadline,
+		ChatMessages:     chatMessages,
+		VoicePlayerIDs:   voicePlayerIDsLocked(room),
 		Message:          room.Message,
 	}
 }

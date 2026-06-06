@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type Dispatch,
+  type FormEvent,
+  type SetStateAction,
+} from 'react'
 import './App.css'
 import {
   GANJI_LIMIT,
@@ -33,8 +41,12 @@ import {
 } from './onlineConnection'
 import type {
   ClientToServerMessage,
+  OnlineChatMessage,
   OnlineRoomView,
   ServerToClientMessage,
+  VoiceIceCandidate,
+  VoiceSessionDescription,
+  VoiceSignalPayload,
 } from './online'
 
 const GANJI_SUCCESS_AUDIO = '/audio/Ganji_Success.mp3'
@@ -236,6 +248,21 @@ type OnlineMultiplayerProps = {
   cardArtworkStyle: CardArtworkStyle
 }
 
+type RemoteVoiceStreams = Record<string, MediaStream>
+
+type VoiceClientContext = {
+  socketRef: { current: WebSocket | null }
+  localVoiceStreamRef: { current: MediaStream | null }
+  peerConnectionsRef: { current: Map<string, RTCPeerConnection> }
+  offeredVoicePeersRef: { current: Set<string> }
+  pendingIceCandidatesRef: { current: Map<string, VoiceIceCandidate[]> }
+  setRemoteVoiceStreams: Dispatch<SetStateAction<RemoteVoiceStreams>>
+}
+
+const VOICE_ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+]
+
 function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   const socketRef = useRef<WebSocket | null>(null)
   const reconnectTimerRef = useRef<number | null>(null)
@@ -244,6 +271,11 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   const roomRef = useRef<OnlineRoomView | null>(null)
   const savedSessionRef = useRef<SavedOnlineSession | null>(null)
   const pendingConnectionTypeRef = useRef<ClientToServerMessage['type'] | null>(null)
+  const localVoiceStreamRef = useRef<MediaStream | null>(null)
+  const voiceEnabledRef = useRef(false)
+  const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>())
+  const offeredVoicePeersRef = useRef(new Set<string>())
+  const pendingIceCandidatesRef = useRef(new Map<string, VoiceIceCandidate[]>())
   const [connectionStatus, setConnectionStatus] =
     useState<OnlineConnectionStatus>('idle')
   const [playerName, setPlayerName] = useState(() => loadOnlinePlayerName(getOnlineStorage()))
@@ -265,6 +297,19 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     turnKey: '',
     cardIds: [],
   })
+  const [chatMessages, setChatMessages] = useState<OnlineChatMessage[]>([])
+  const [chatDraft, setChatDraft] = useState('')
+  const [mutedTextPlayerIds, setMutedTextPlayerIds] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const [voiceEnabled, setVoiceEnabled] = useState(false)
+  const [voiceSelfMuted, setVoiceSelfMuted] = useState(false)
+  const [mutedVoicePlayerIds, setMutedVoicePlayerIds] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const [remoteVoiceStreams, setRemoteVoiceStreams] =
+    useState<RemoteVoiceStreams>({})
+  const [voiceMessage, setVoiceMessage] = useState('Voice chat is off.')
 
   const gameState = room?.gameState ?? null
   const currentPlayer = gameState?.players[gameState.currentPlayerIndex]
@@ -343,9 +388,47 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
         reconnectTimerRef.current = null
       }
       intentionalCloseRef.current = true
+      cleanupVoiceChat(
+        {
+          socketRef,
+          localVoiceStreamRef,
+          peerConnectionsRef,
+          offeredVoicePeersRef,
+          pendingIceCandidatesRef,
+          setRemoteVoiceStreams,
+        },
+        true,
+      )
       socketRef.current?.close()
     }
   }, [])
+
+  useEffect(() => {
+    voiceEnabledRef.current = voiceEnabled
+  }, [voiceEnabled])
+
+  useEffect(() => {
+    localVoiceStreamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = !voiceSelfMuted
+    })
+  }, [voiceSelfMuted])
+
+  useEffect(() => {
+    if (!room || !voiceEnabled) {
+      return
+    }
+
+    void syncVoicePeers(room, {
+      socketRef,
+      localVoiceStreamRef,
+      peerConnectionsRef,
+      offeredVoicePeersRef,
+      pendingIceCandidatesRef,
+      setRemoteVoiceStreams,
+    }).catch(() => {
+      setVoiceMessage('Could not connect to every voice peer.')
+    })
+  }, [room, voiceEnabled])
 
   function clearReconnectTimer() {
     if (reconnectTimerRef.current === null) {
@@ -368,6 +451,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
 
     intentionalCloseRef.current = false
     pendingConnectionTypeRef.current = message.type
+    stopVoiceChat(false)
     socketRef.current?.close()
     setConnectionStatus(status)
     setServerMessage(
@@ -411,12 +495,14 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
       }
 
       if (roomRef.current && savedSessionRef.current) {
+        stopVoiceChat(false)
         scheduleAutoReconnect()
         return
       }
 
       setConnectionStatus('disconnected')
       setServerMessage('Disconnected from the Ganji server.')
+      stopVoiceChat(false)
     })
 
     socket.addEventListener('error', () => {
@@ -493,7 +579,47 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
       setSelection({ turnKey: '', cardIds: [] })
       setConnectionStatus('disconnected')
       setServerMessage(message.message)
+      stopVoiceChat(false)
       forgetOnlineSession()
+      return
+    }
+
+    if (message.type === 'CHAT_MESSAGE') {
+      setChatMessages((currentMessages) => appendChatMessage(currentMessages, message.message))
+      return
+    }
+
+    if (message.type === 'VOICE_PEER_JOINED') {
+      setVoiceMessage('A player joined voice chat.')
+      return
+    }
+
+    if (message.type === 'VOICE_PEER_LEFT') {
+      closeVoicePeer(message.playerId, {
+        socketRef,
+        localVoiceStreamRef,
+        peerConnectionsRef,
+        offeredVoicePeersRef,
+        pendingIceCandidatesRef,
+        setRemoteVoiceStreams,
+      })
+      setVoiceMessage('A player left voice chat.')
+      return
+    }
+
+    if (message.type === 'VOICE_SIGNAL') {
+      if (voiceEnabledRef.current) {
+        void handleVoiceSignal(message.fromPlayerId, message.signal, {
+          socketRef,
+          localVoiceStreamRef,
+          peerConnectionsRef,
+          offeredVoicePeersRef,
+          pendingIceCandidatesRef,
+          setRemoteVoiceStreams,
+        }).catch(() => {
+          setVoiceMessage('Voice connection failed.')
+        })
+      }
       return
     }
 
@@ -503,6 +629,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     setConnectionStatus('connected')
     roomRef.current = message.room
     setRoom(message.room)
+    setChatMessages(message.room.chatMessages)
     setServerMessage(message.room.message)
 
     const session = {
@@ -536,6 +663,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
   function leaveOnlineRoom() {
     clearReconnectTimer()
     intentionalCloseRef.current = true
+    stopVoiceChat(true)
     const socket = socketRef.current
     socketRef.current = null
     pendingConnectionTypeRef.current = null
@@ -548,6 +676,7 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
     savedSessionRef.current = null
     setRoom(null)
     setSavedSession(null)
+    setChatMessages([])
     setSelection({ turnKey: '', cardIds: [] })
     setConnectionStatus('idle')
     forgetStoredOnlineSession(getOnlineStorage())
@@ -556,6 +685,74 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
 
   function deleteOnlineRoom() {
     sendOnlineMessage({ type: 'DELETE_ROOM' })
+  }
+
+  function sendChatMessage() {
+    const text = chatDraft.trim()
+    if (!text) {
+      return
+    }
+
+    sendOnlineMessage({ type: 'SEND_CHAT_MESSAGE', text })
+    setChatDraft('')
+  }
+
+  async function startVoiceChat() {
+    if (voiceEnabled) {
+      return
+    }
+
+    if (!room || socketRef.current?.readyState !== WebSocket.OPEN) {
+      setVoiceMessage('Join a connected room before starting voice chat.')
+      return
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setVoiceMessage('This browser does not support microphone voice chat.')
+      return
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = !voiceSelfMuted
+      })
+      localVoiceStreamRef.current = stream
+      setVoiceEnabled(true)
+      setVoiceMessage('Voice chat is on.')
+      sendOnlineMessage({ type: 'VOICE_JOIN' })
+    } catch {
+      setVoiceMessage('Microphone permission was blocked.')
+    }
+  }
+
+  function stopVoiceChat(notifyServer: boolean) {
+    if (notifyServer && socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'VOICE_LEAVE' } satisfies ClientToServerMessage))
+    }
+
+    cleanupVoiceChat(
+      {
+        socketRef,
+        localVoiceStreamRef,
+        peerConnectionsRef,
+        offeredVoicePeersRef,
+        pendingIceCandidatesRef,
+        setRemoteVoiceStreams,
+      },
+      true,
+    )
+    setVoiceEnabled(false)
+    voiceEnabledRef.current = false
+    setVoiceMessage('Voice chat is off.')
+  }
+
+  function toggleTextMute(playerId: string) {
+    setMutedTextPlayerIds((currentPlayerIds) => toggleSetMember(currentPlayerIds, playerId))
+  }
+
+  function toggleVoiceMute(playerId: string) {
+    setMutedVoicePlayerIds((currentPlayerIds) => toggleSetMember(currentPlayerIds, playerId))
   }
 
   function joinOnlineRoom() {
@@ -646,6 +843,24 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
           onCallGanji={() => sendOnlineMessage({ type: 'CALL_GANJI' })}
           onNextRound={() => sendOnlineMessage({ type: 'START_NEXT_ROUND' })}
           onReset={leaveOnlineRoom}
+        />
+        <RoomCommunicationPanel
+          room={room}
+          chatMessages={chatMessages}
+          chatDraft={chatDraft}
+          mutedTextPlayerIds={mutedTextPlayerIds}
+          voiceEnabled={voiceEnabled}
+          voiceSelfMuted={voiceSelfMuted}
+          mutedVoicePlayerIds={mutedVoicePlayerIds}
+          remoteVoiceStreams={remoteVoiceStreams}
+          voiceMessage={voiceMessage}
+          onChatDraftChange={setChatDraft}
+          onSendChat={sendChatMessage}
+          onStartVoice={startVoiceChat}
+          onStopVoice={() => stopVoiceChat(true)}
+          onToggleSelfMute={() => setVoiceSelfMuted((muted) => !muted)}
+          onToggleTextMute={toggleTextMute}
+          onToggleVoiceMute={toggleVoiceMute}
         />
       </>
     )
@@ -767,23 +982,43 @@ function OnlineMultiplayer({ cardArtworkStyle }: OnlineMultiplayerProps) {
         )}
 
         {room && (
-          <OnlineLobby
-            room={room}
-            connectionStatus={connectionStatus}
-            actionsDisabled={actionsDisabled}
-            onAddBot={() => sendOnlineMessage({ type: 'ADD_BOT' })}
-            onRemoveBot={(playerId) =>
-              sendOnlineMessage({ type: 'REMOVE_BOT', playerId })
-            }
-            onKickPlayer={(playerId) =>
-              sendOnlineMessage({ type: 'KICK_PLAYER', playerId })
-            }
-            onSetReady={(ready) => sendOnlineMessage({ type: 'SET_READY', ready })}
-            onStartGame={() => sendOnlineMessage({ type: 'START_GAME' })}
-            onDeleteRoom={deleteOnlineRoom}
-            onLeaveRoom={leaveOnlineRoom}
-            onReconnect={reconnectOnlineRoom}
-          />
+          <>
+            <OnlineLobby
+              room={room}
+              connectionStatus={connectionStatus}
+              actionsDisabled={actionsDisabled}
+              onAddBot={() => sendOnlineMessage({ type: 'ADD_BOT' })}
+              onRemoveBot={(playerId) =>
+                sendOnlineMessage({ type: 'REMOVE_BOT', playerId })
+              }
+              onKickPlayer={(playerId) =>
+                sendOnlineMessage({ type: 'KICK_PLAYER', playerId })
+              }
+              onSetReady={(ready) => sendOnlineMessage({ type: 'SET_READY', ready })}
+              onStartGame={() => sendOnlineMessage({ type: 'START_GAME' })}
+              onDeleteRoom={deleteOnlineRoom}
+              onLeaveRoom={leaveOnlineRoom}
+              onReconnect={reconnectOnlineRoom}
+            />
+            <RoomCommunicationPanel
+              room={room}
+              chatMessages={chatMessages}
+              chatDraft={chatDraft}
+              mutedTextPlayerIds={mutedTextPlayerIds}
+              voiceEnabled={voiceEnabled}
+              voiceSelfMuted={voiceSelfMuted}
+              mutedVoicePlayerIds={mutedVoicePlayerIds}
+              remoteVoiceStreams={remoteVoiceStreams}
+              voiceMessage={voiceMessage}
+              onChatDraftChange={setChatDraft}
+              onSendChat={sendChatMessage}
+              onStartVoice={startVoiceChat}
+              onStopVoice={() => stopVoiceChat(true)}
+              onToggleSelfMute={() => setVoiceSelfMuted((muted) => !muted)}
+              onToggleTextMute={toggleTextMute}
+              onToggleVoiceMute={toggleVoiceMute}
+            />
+          </>
         )}
       </div>
 
@@ -1039,6 +1274,412 @@ function formatOnlinePlayerStatus(player: OnlineRoomView['players'][number]): st
   return `${player.connected ? 'Connected' : 'Disconnected'} - ${
     player.ready ? 'ready' : 'not ready'
   }`
+}
+
+type RoomCommunicationPanelProps = {
+  room: OnlineRoomView
+  chatMessages: OnlineChatMessage[]
+  chatDraft: string
+  mutedTextPlayerIds: Set<string>
+  voiceEnabled: boolean
+  voiceSelfMuted: boolean
+  mutedVoicePlayerIds: Set<string>
+  remoteVoiceStreams: RemoteVoiceStreams
+  voiceMessage: string
+  onChatDraftChange: (value: string) => void
+  onSendChat: () => void
+  onStartVoice: () => void
+  onStopVoice: () => void
+  onToggleSelfMute: () => void
+  onToggleTextMute: (playerId: string) => void
+  onToggleVoiceMute: (playerId: string) => void
+}
+
+function RoomCommunicationPanel({
+  room,
+  chatMessages,
+  chatDraft,
+  mutedTextPlayerIds,
+  voiceEnabled,
+  voiceSelfMuted,
+  mutedVoicePlayerIds,
+  remoteVoiceStreams,
+  voiceMessage,
+  onChatDraftChange,
+  onSendChat,
+  onStartVoice,
+  onStopVoice,
+  onToggleSelfMute,
+  onToggleTextMute,
+  onToggleVoiceMute,
+}: RoomCommunicationPanelProps) {
+  const visibleChatMessages = chatMessages.filter(
+    (message) => !mutedTextPlayerIds.has(message.playerId),
+  )
+  const voicePlayerIds = new Set(room.voicePlayerIds)
+
+  function submitChat(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    onSendChat()
+  }
+
+  return (
+    <section className="room-communication-panel panel">
+      <div className="chat-panel">
+        <div className="communication-heading">
+          <p className="eyebrow">Room chat</p>
+          <h2>Chat</h2>
+        </div>
+        <div className="chat-message-list" aria-label="Room chat messages">
+          {visibleChatMessages.length === 0 ? (
+            <p className="empty-chat-message">No visible messages yet.</p>
+          ) : (
+            visibleChatMessages.map((message) => (
+              <div className="chat-message" key={message.id}>
+                <div>
+                  <strong>{message.playerName}</strong>
+                  <span>{formatChatTime(message.sentAt)}</span>
+                </div>
+                <p>{message.text}</p>
+              </div>
+            ))
+          )}
+        </div>
+        <form className="chat-form" onSubmit={submitChat}>
+          <input
+            aria-label="Chat message"
+            maxLength={500}
+            onChange={(event) => onChatDraftChange(event.target.value)}
+            placeholder="Type a message..."
+            value={chatDraft}
+          />
+          <button
+            className="primary-button"
+            disabled={!chatDraft.trim()}
+            type="submit"
+          >
+            Send
+          </button>
+        </form>
+      </div>
+
+      <div className="voice-panel">
+        <div className="communication-heading">
+          <p className="eyebrow">Voice chat</p>
+          <h2>Voice</h2>
+        </div>
+        <p className="voice-status-text">{voiceMessage}</p>
+        <div className="button-row voice-main-controls">
+          {voiceEnabled ? (
+            <button className="secondary-button" type="button" onClick={onStopVoice}>
+              Leave voice
+            </button>
+          ) : (
+            <button className="primary-button" type="button" onClick={onStartVoice}>
+              Join voice
+            </button>
+          )}
+          <button
+            className="ghost-button"
+            disabled={!voiceEnabled}
+            type="button"
+            onClick={onToggleSelfMute}
+          >
+            {voiceSelfMuted ? 'Unmute me' : 'Mute me'}
+          </button>
+        </div>
+        <div className="communication-player-list">
+          {room.players
+            .filter((player) => !player.isBot)
+            .map((player) => {
+              const isViewer = player.id === room.viewerPlayerId
+              const textMuted = mutedTextPlayerIds.has(player.id)
+              const voiceMuted = mutedVoicePlayerIds.has(player.id)
+              const inVoice = voicePlayerIds.has(player.id)
+
+              return (
+                <div className="communication-player-row" key={player.id}>
+                  <div>
+                    <strong>{player.name}{isViewer ? ' (you)' : ''}</strong>
+                    <span>{inVoice ? 'In voice' : 'Voice off'}</span>
+                  </div>
+                  <div className="button-row compact-buttons">
+                    {!isViewer && (
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => onToggleTextMute(player.id)}
+                      >
+                        {textMuted ? 'Unmute text' : 'Mute text'}
+                      </button>
+                    )}
+                    {!isViewer && (
+                      <button
+                        className="ghost-button"
+                        disabled={!inVoice}
+                        type="button"
+                        onClick={() => onToggleVoiceMute(player.id)}
+                      >
+                        {voiceMuted ? 'Unmute voice' : 'Mute voice'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+        </div>
+        <div className="remote-audio-list" aria-hidden="true">
+          {Object.entries(remoteVoiceStreams).map(([playerId, stream]) => (
+            <RemoteVoiceAudio
+              key={playerId}
+              muted={mutedVoicePlayerIds.has(playerId)}
+              stream={stream}
+            />
+          ))}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+type RemoteVoiceAudioProps = {
+  stream: MediaStream
+  muted: boolean
+}
+
+function RemoteVoiceAudio({ stream, muted }: RemoteVoiceAudioProps) {
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.srcObject = stream
+    }
+  }, [stream])
+
+  return <audio autoPlay muted={muted} playsInline ref={audioRef} />
+}
+
+function appendChatMessage(
+  messages: OnlineChatMessage[],
+  message: OnlineChatMessage,
+): OnlineChatMessage[] {
+  if (messages.some((currentMessage) => currentMessage.id === message.id)) {
+    return messages
+  }
+
+  return [...messages, message].slice(-100)
+}
+
+function toggleSetMember(currentSet: Set<string>, playerId: string): Set<string> {
+  const nextSet = new Set(currentSet)
+  if (nextSet.has(playerId)) {
+    nextSet.delete(playerId)
+  } else {
+    nextSet.add(playerId)
+  }
+
+  return nextSet
+}
+
+async function syncVoicePeers(
+  room: OnlineRoomView,
+  context: VoiceClientContext,
+) {
+  const activePeerIds = new Set(
+    room.voicePlayerIds.filter((playerId) => playerId !== room.viewerPlayerId),
+  )
+
+  for (const peerId of context.peerConnectionsRef.current.keys()) {
+    if (!activePeerIds.has(peerId)) {
+      closeVoicePeer(peerId, context)
+    }
+  }
+
+  for (const peerId of activePeerIds) {
+    const peerConnection = ensureVoicePeer(peerId, context)
+    const shouldCreateOffer = room.viewerPlayerId < peerId
+
+    if (
+      shouldCreateOffer &&
+      peerConnection.signalingState === 'stable' &&
+      !context.offeredVoicePeersRef.current.has(peerId)
+    ) {
+      context.offeredVoicePeersRef.current.add(peerId)
+      const offer = await peerConnection.createOffer()
+      await peerConnection.setLocalDescription(offer)
+      sendVoiceSignal(context.socketRef, peerId, {
+        kind: 'offer',
+        description: toVoiceDescription(offer),
+      })
+    }
+  }
+}
+
+async function handleVoiceSignal(
+  fromPlayerId: string,
+  signal: VoiceSignalPayload,
+  context: VoiceClientContext,
+) {
+  const peerConnection = ensureVoicePeer(fromPlayerId, context)
+
+  if (signal.kind === 'offer') {
+    await peerConnection.setRemoteDescription(signal.description)
+    await flushPendingIceCandidates(fromPlayerId, peerConnection, context)
+    const answer = await peerConnection.createAnswer()
+    await peerConnection.setLocalDescription(answer)
+    sendVoiceSignal(context.socketRef, fromPlayerId, {
+      kind: 'answer',
+      description: toVoiceDescription(answer),
+    })
+    return
+  }
+
+  if (signal.kind === 'answer') {
+    await peerConnection.setRemoteDescription(signal.description)
+    await flushPendingIceCandidates(fromPlayerId, peerConnection, context)
+    return
+  }
+
+  if (!peerConnection.remoteDescription) {
+    const pendingCandidates = context.pendingIceCandidatesRef.current.get(fromPlayerId) ?? []
+    context.pendingIceCandidatesRef.current.set(fromPlayerId, [
+      ...pendingCandidates,
+      signal.candidate,
+    ])
+    return
+  }
+
+  await peerConnection.addIceCandidate(signal.candidate)
+}
+
+function ensureVoicePeer(
+  peerId: string,
+  context: VoiceClientContext,
+): RTCPeerConnection {
+  const existingConnection = context.peerConnectionsRef.current.get(peerId)
+  if (existingConnection && existingConnection.connectionState !== 'closed') {
+    return existingConnection
+  }
+
+  const peerConnection = new RTCPeerConnection({ iceServers: VOICE_ICE_SERVERS })
+  const localStream = context.localVoiceStreamRef.current
+  if (localStream) {
+    for (const track of localStream.getAudioTracks()) {
+      peerConnection.addTrack(track, localStream)
+    }
+  }
+
+  peerConnection.addEventListener('icecandidate', (event) => {
+    if (!event.candidate) {
+      return
+    }
+
+    sendVoiceSignal(context.socketRef, peerId, {
+      kind: 'ice-candidate',
+      candidate: toVoiceIceCandidate(event.candidate),
+    })
+  })
+
+  peerConnection.addEventListener('track', (event) => {
+    const [remoteStream] = event.streams
+    if (!remoteStream) {
+      return
+    }
+
+    context.setRemoteVoiceStreams((currentStreams) => ({
+      ...currentStreams,
+      [peerId]: remoteStream,
+    }))
+  })
+
+  context.peerConnectionsRef.current.set(peerId, peerConnection)
+  return peerConnection
+}
+
+function closeVoicePeer(peerId: string, context: VoiceClientContext) {
+  context.peerConnectionsRef.current.get(peerId)?.close()
+  context.peerConnectionsRef.current.delete(peerId)
+  context.offeredVoicePeersRef.current.delete(peerId)
+  context.pendingIceCandidatesRef.current.delete(peerId)
+  context.setRemoteVoiceStreams((currentStreams) => {
+    const remainingStreams = { ...currentStreams }
+    delete remainingStreams[peerId]
+    return remainingStreams
+  })
+}
+
+function cleanupVoiceChat(context: VoiceClientContext, stopLocalStream: boolean) {
+  for (const peerId of Array.from(context.peerConnectionsRef.current.keys())) {
+    closeVoicePeer(peerId, context)
+  }
+
+  context.offeredVoicePeersRef.current.clear()
+  context.pendingIceCandidatesRef.current.clear()
+
+  if (stopLocalStream) {
+    context.localVoiceStreamRef.current?.getTracks().forEach((track) => track.stop())
+    context.localVoiceStreamRef.current = null
+  }
+
+  context.setRemoteVoiceStreams({})
+}
+
+async function flushPendingIceCandidates(
+  peerId: string,
+  peerConnection: RTCPeerConnection,
+  context: VoiceClientContext,
+) {
+  const pendingCandidates = context.pendingIceCandidatesRef.current.get(peerId) ?? []
+  context.pendingIceCandidatesRef.current.delete(peerId)
+
+  for (const candidate of pendingCandidates) {
+    await peerConnection.addIceCandidate(candidate)
+  }
+}
+
+function sendVoiceSignal(
+  socketRef: { current: WebSocket | null },
+  targetPlayerId: string,
+  signal: VoiceSignalPayload,
+) {
+  if (socketRef.current?.readyState !== WebSocket.OPEN) {
+    return
+  }
+
+  socketRef.current.send(
+    JSON.stringify({
+      type: 'VOICE_SIGNAL',
+      targetPlayerId,
+      signal,
+    } satisfies ClientToServerMessage),
+  )
+}
+
+function toVoiceDescription(
+  description: RTCSessionDescriptionInit,
+): VoiceSessionDescription {
+  return {
+    type: description.type === 'answer' ? 'answer' : 'offer',
+    sdp: description.sdp ?? '',
+  }
+}
+
+function toVoiceIceCandidate(candidate: RTCIceCandidate): VoiceIceCandidate {
+  const candidateJson = candidate.toJSON()
+
+  return {
+    candidate: candidateJson.candidate ?? '',
+    sdpMid: candidateJson.sdpMid ?? null,
+    sdpMLineIndex: candidateJson.sdpMLineIndex ?? null,
+    usernameFragment: candidateJson.usernameFragment ?? null,
+  }
+}
+
+function formatChatTime(sentAt: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(sentAt)
 }
 
 function OnlineRulesPanel() {

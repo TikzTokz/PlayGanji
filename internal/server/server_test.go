@@ -250,6 +250,84 @@ func TestHostLeaveTransfersLobbyHost(t *testing.T) {
 	}
 }
 
+func TestChatAndVoiceMessages(t *testing.T) {
+	host, _, guest, cleanup := createHostGuestRoom(t)
+	defer cleanup()
+
+	sendWS(t, guest, map[string]any{"type": "SEND_CHAT_MESSAGE", "text": " hello from smoke "})
+	chatRaw := readRawUntil(t, host, "CHAT_MESSAGE")
+	var chatEnvelope struct {
+		Type    string            `json:"type"`
+		Message OnlineChatMessage `json:"message"`
+	}
+	if err := json.Unmarshal(chatRaw, &chatEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if chatEnvelope.Message.PlayerID != "player-2" || chatEnvelope.Message.Text != "hello from smoke" {
+		t.Fatalf("chat message = %#v", chatEnvelope.Message)
+	}
+
+	sendWS(t, host, map[string]any{"type": "VOICE_JOIN"})
+	if message := readUntil(t, host, "VOICE_PEER_JOINED"); message.PlayerID != "player-1" {
+		t.Fatalf("host voice join = %#v", message)
+	}
+	if message := readUntil(t, guest, "VOICE_PEER_JOINED"); message.PlayerID != "player-1" {
+		t.Fatalf("guest sees host voice join = %#v", message)
+	}
+	hostUpdate := readUntil(t, host, "ROOM_UPDATE")
+	if len(hostUpdate.Room.ChatMessages) != 1 || hostUpdate.Room.ChatMessages[0].Text != "hello from smoke" {
+		t.Fatalf("room chat history = %#v", hostUpdate.Room.ChatMessages)
+	}
+	if len(hostUpdate.Room.VoicePlayerIDs) != 1 || hostUpdate.Room.VoicePlayerIDs[0] != "player-1" {
+		t.Fatalf("voice players = %#v", hostUpdate.Room.VoicePlayerIDs)
+	}
+
+	sendWS(t, guest, map[string]any{"type": "VOICE_JOIN"})
+	if message := readUntil(t, host, "VOICE_PEER_JOINED"); message.PlayerID != "player-2" {
+		t.Fatalf("host sees guest voice join = %#v", message)
+	}
+
+	sendWS(t, host, map[string]any{
+		"type":           "VOICE_SIGNAL",
+		"targetPlayerId": "player-2",
+		"signal": map[string]any{
+			"kind": "offer",
+			"description": map[string]any{
+				"type": "offer",
+				"sdp":  "v=0\r\n",
+			},
+		},
+	})
+	voiceSignalRaw := readRawUntil(t, guest, "VOICE_SIGNAL")
+	var voiceSignal struct {
+		Type         string `json:"type"`
+		FromPlayerID string `json:"fromPlayerId"`
+		Signal       struct {
+			Kind        string `json:"kind"`
+			Description struct {
+				SDP string `json:"sdp"`
+			} `json:"description"`
+		} `json:"signal"`
+	}
+	if err := json.Unmarshal(voiceSignalRaw, &voiceSignal); err != nil {
+		t.Fatal(err)
+	}
+	if voiceSignal.FromPlayerID != "player-1" || voiceSignal.Signal.Kind != "offer" || voiceSignal.Signal.Description.SDP != "v=0\r\n" {
+		t.Fatalf("voice signal = %#v", voiceSignal)
+	}
+
+	sendWS(t, guest, map[string]any{"type": "VOICE_LEAVE"})
+	if message := readUntil(t, host, "VOICE_PEER_LEFT"); message.PlayerID != "player-2" {
+		t.Fatalf("host sees guest voice leave = %#v", message)
+	}
+	hostUpdate = readUntil(t, host, "ROOM_UPDATE")
+	for _, playerID := range hostUpdate.Room.VoicePlayerIDs {
+		if playerID == "player-2" {
+			t.Fatalf("guest remained in voice list: %#v", hostUpdate.Room.VoicePlayerIDs)
+		}
+	}
+}
+
 func TestReconnectCheckRejectsOversizedBody(t *testing.T) {
 	ganjiServer := New("dist")
 	testServer := httptest.NewServer(ganjiServer.Handler())
@@ -400,6 +478,33 @@ func readUntil(t *testing.T, conn *websocket.Conn, messageType string) serverMes
 	}
 	t.Fatalf("timed out waiting for %s", messageType)
 	return serverMessage{}
+}
+
+func readRawUntil(t *testing.T, conn *websocket.Conn, messageType string) json.RawMessage {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+
+		_, rawMessage, err := conn.ReadMessage()
+		if err != nil {
+			continue
+		}
+
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(rawMessage, &envelope); err != nil {
+			continue
+		}
+		if envelope.Type == messageType {
+			return rawMessage
+		}
+	}
+	t.Fatalf("timed out waiting for %s", messageType)
+	return nil
 }
 
 func readUntilPlaying(t *testing.T, conn *websocket.Conn) serverMessage {

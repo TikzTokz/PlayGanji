@@ -9,6 +9,31 @@ export type OnlineLobbyPlayer = SetupPlayerConfig & {
   substituteActive: boolean
 }
 
+export type OnlineChatMessage = {
+  id: string
+  playerId: string
+  playerName: string
+  text: string
+  sentAt: number
+}
+
+export type VoiceSessionDescription = {
+  type: 'offer' | 'answer'
+  sdp: string
+}
+
+export type VoiceIceCandidate = {
+  candidate: string
+  sdpMid: string | null
+  sdpMLineIndex: number | null
+  usernameFragment?: string | null
+}
+
+export type VoiceSignalPayload =
+  | { kind: 'offer'; description: VoiceSessionDescription }
+  | { kind: 'answer'; description: VoiceSessionDescription }
+  | { kind: 'ice-candidate'; candidate: VoiceIceCandidate }
+
 export type OnlineRoomView = {
   roomCode: string
   status: OnlineRoomStatus
@@ -19,6 +44,8 @@ export type OnlineRoomView = {
   turnTimerSeconds: number
   gameOverScore: number
   turnDeadline: number | null
+  chatMessages: OnlineChatMessage[]
+  voicePlayerIds: string[]
   message: string
 }
 
@@ -38,8 +65,16 @@ export type ClientToServerMessage =
   | { type: 'CALL_GANJI' }
   | { type: 'END_TURN' }
   | { type: 'START_NEXT_ROUND' }
+  | { type: 'SEND_CHAT_MESSAGE'; text: string }
+  | { type: 'VOICE_JOIN' }
+  | { type: 'VOICE_LEAVE' }
+  | { type: 'VOICE_SIGNAL'; targetPlayerId: string; signal: VoiceSignalPayload }
 
 export type ServerToClientMessage =
   | { type: 'ROOM_UPDATE'; room: OnlineRoomView; sessionId: string }
   | { type: 'ROOM_CLOSED'; roomCode: string; message: string }
+  | { type: 'CHAT_MESSAGE'; message: OnlineChatMessage }
+  | { type: 'VOICE_PEER_JOINED'; playerId: string }
+  | { type: 'VOICE_PEER_LEFT'; playerId: string }
+  | { type: 'VOICE_SIGNAL'; fromPlayerId: string; signal: VoiceSignalPayload }
   | { type: 'ERROR'; code?: string; message: string }

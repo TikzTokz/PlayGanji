@@ -2,7 +2,7 @@
 
 Online-only Ganji built with a React, TypeScript, and Vite frontend plus an authoritative Go server.
 
-The Go server owns rooms, hands, turns, scores, BOT actions, reconnects, and timeouts. It also serves the built frontend in production.
+The Go server owns rooms, hands, turns, scores, BOT actions, reconnects, timeouts, chat, and voice signaling. It also serves the built frontend in production.
 
 ## Requirements
 
@@ -48,6 +48,14 @@ http://localhost:3001
 ```
 
 The Go server serves `dist`, `/ws`, `/health`, and `/api/reconnect-check` from the same port.
+
+Online rooms require all connected humans to mark ready before the host can start.
+The host and BOT players are always ready, and the host can kick human players from the lobby or delete the room.
+Kicked players can join again with the room code.
+If a player disconnects after the game starts, they get one normal timeout before a BOT plays their seat.
+When they rejoin, they continue with the hand, score, and seat updated by any BOT actions.
+Rooms include text chat and optional voice chat for connected human players.
+Voice chat uses browser WebRTC peer connections, with the Go WebSocket server only relaying signaling messages.
 
 ## Scripts
 
@@ -126,6 +134,8 @@ http://127.0.0.1:3001
 
 WebSockets are served at `/ws` on the same origin.
 
+Voice chat works on `localhost` during development. Browser microphone access usually requires HTTPS after deployment, except on local development origins. The client uses Google's public STUN server by default; restrictive networks may need a TURN server for reliable voice connections.
+
 ## Run With Docker
 
 Build and start the production app with Docker Compose:
@@ -182,3 +192,4 @@ Deploy runs on the self-hosted runner from `/opt/PlayGanji` with Docker Compose 
 - The game ends when any player reaches the selected point limit or more; lowest total score wins.
 - The server auto-plays a discard or draw when a turn timer expires.
 - Disconnected humans get one timeout, then a BOT plays their seat until they rejoin.
+- Rooms include text chat, voice chat, self microphone mute, local per-player voice mute, and local per-player text mute.
