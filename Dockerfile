@@ -10,7 +10,7 @@ WORKDIR /app
 COPY . .
 RUN bun run build
 
-FROM docker.io/library/golang:1.25.11-alpine@sha256:c05ba4b73604069d376c4f41346b05374335b5ca0c46fb6dfede5a59f5196931 AS server-build
+FROM docker.io/library/golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS server-build
 WORKDIR /app
 
 COPY go.mod go.sum ./
